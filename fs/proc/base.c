@@ -48,7 +48,7 @@
  */
 
 #include <asm/uaccess.h>
-
+#include <asm/tlbflush.h>
 #include <linux/errno.h>
 #include <linux/time.h>
 #include <linux/proc_fs.h>
@@ -84,6 +84,7 @@
 #include <linux/fs_struct.h>
 #include <linux/slab.h>
 #include <linux/flex_array.h>
+#include <asm/cacheflush.h>
 #ifdef CONFIG_HARDWALL
 #include <asm/hardwall.h>
 #endif
@@ -829,19 +830,16 @@ static int mem_release(struct inode *inode, struct file *file)
 
 int mem_mmap(struct file * file, struct vm_area_struct * vma)
 {
-        struct task_struct *tsk;
+        struct task_struct *task = get_proc_task(file->f_dentry->d_inode);
         pgd_t *src_dir, *dest_dir;
+        pud_t *src_indir, *dest_indir;
         pmd_t *src_middle, *dest_middle;
         pte_t *src_table, *dest_table;
         unsigned long stmp, dtmp, mapnr;
         struct vm_area_struct *src_vma = NULL;
-        struct inode *inode = file->f_dentry->d_inode;
 
         /* Get the source's task information */
-
-        tsk = get_task(inode->i_ino >> 16);
-
-        if (!tsk)
+        if (!task)
                 return -ESRCH;
 
         /* Ensure that we have a valid source area.  (Has to be mmap'ed and
@@ -849,43 +847,50 @@ int mem_mmap(struct file * file, struct vm_area_struct * vma)
          moment because working out the vm_area_struct & nattach stuff isn't
          worth it. */
 
-        src_vma = tsk->mm->mmap;
-        stmp = vma->vm_offset;
-        while (stmp < vma->vm_offset + (vma->vm_end - vma->vm_start)) {
+        src_vma = task->mm->mmap;
+        stmp = vma->vm_pgoff;
+        while (stmp < vma->vm_pgoff + (vma->vm_end - vma->vm_start)) {
                 while (src_vma && stmp > src_vma->vm_end)
                         src_vma = src_vma->vm_next;
-                if (!src_vma || (src_vma->vm_flags & VM_SHM))
+                if (!src_vma || (src_vma->vm_flags & VM_SHARED))
                         return -EINVAL;
 
-                src_dir = pgd_offset(tsk->mm, stmp);
+                src_dir = pgd_offset(task->mm, stmp);
                 if (pgd_none(*src_dir))
                         return -EINVAL;
                 if (pgd_bad(*src_dir)) {
                         printk("Bad source page dir entry %08lx\n", pgd_val(*src_dir));
                         return -EINVAL;
                 }
-                src_middle = pmd_offset(src_dir, stmp);
+                src_indir = pud_offset(src_dir, stmp);
+                if (pud_none(*src_indir))
+                        return -EINVAL;
+                if (pud_bad(*src_indir)) {
+                        printk("Bad source page pud entry %08lx\n", pud_val(*src_indir));
+                        return -EINVAL;
+                }
+                src_middle = pmd_offset(src_indir, stmp);
                 if (pmd_none(*src_middle))
                         return -EINVAL;
                 if (pmd_bad(*src_middle)) {
                         printk("Bad source page middle entry %08lx\n", pmd_val(*src_middle));
                         return -EINVAL;
                 }
-                src_table = pte_offset(src_middle, stmp);
+                src_table = pte_offset_map(src_middle, stmp);
                 if (pte_none(*src_table))
                         return -EINVAL;
 
                 if (stmp < src_vma->vm_start) {
                         if (!(src_vma->vm_flags & VM_GROWSDOWN))
                                 return -EINVAL;
-                        if (src_vma->vm_end - stmp > current->rlim[RLIMIT_STACK].rlim_cur)
+                        if (src_vma->vm_end - stmp > current->signal->rlim[RLIMIT_STACK].rlim_cur)
                                 return -EINVAL;
                 }
                 stmp += PAGE_SIZE;
         }
 
-        src_vma = tsk->mm->mmap;
-        stmp    = vma->vm_offset;
+        src_vma = task->mm->mmap;
+        stmp    = vma->vm_pgoff;
         dtmp    = vma->vm_start;
 
         flush_cache_range(vma->vm_mm, vma->vm_start, vma->vm_end);
@@ -894,40 +899,42 @@ int mem_mmap(struct file * file, struct vm_area_struct * vma)
                 while (src_vma && stmp > src_vma->vm_end)
                         src_vma = src_vma->vm_next;
 
-                src_dir = pgd_offset(tsk->mm, stmp);
-                src_middle = pmd_offset(src_dir, stmp);
-                src_table = pte_offset(src_middle, stmp);
+                src_dir = pgd_offset(task->mm, stmp);
+                src_indir = pud_offset(src_dir, stmp);
+                src_middle = pmd_offset(src_indir, stmp);
+                src_table = pte_offset_map(src_middle, stmp);
 
                 dest_dir = pgd_offset(current->mm, dtmp);
-                dest_middle = pmd_alloc(dest_dir, dtmp);
+                //TODO SKETCH
+                dest_indir = pud_alloc(current->mm, dest_dir, dtmp);
+                if (!dest_indir)
+                        return -ENOMEM;
+                dest_middle = pmd_alloc(current->mm, dest_indir, dtmp);
                 if (!dest_middle)
                         return -ENOMEM;
-                dest_table = pte_alloc(dest_middle, dtmp);
+                dest_table = pte_alloc_map(current->mm, vma, dest_middle, dtmp);
                 if (!dest_table)
                         return -ENOMEM;
 
                 if (!pte_present(*src_table)) {
-                        if (handle_mm_fault(tsk, src_vma, stmp, 1) < 0)
+                        if (handle_mm_fault(task->mm, src_vma, stmp, 1) < 0)
                                 return -ENOMEM;
                 }
 
                 if ((vma->vm_flags & VM_WRITE) && !pte_write(*src_table)) {
-                        if (handle_mm_fault(tsk, src_vma, stmp, 1) < 0)
+                        if (handle_mm_fault(task->mm, src_vma, stmp, 1) < 0)
                                 return -ENOMEM;
                 }
 
                 set_pte(src_table, pte_mkdirty(*src_table));
                 set_pte(dest_table, *src_table);
-                mapnr = MAP_NR(pte_page(*src_table));
-                if (mapnr < max_mapnr)
-                        atomic_inc(&mem_map[MAP_NR(pte_page(*src_table))].count);
 
                 stmp += PAGE_SIZE;
                 dtmp += PAGE_SIZE;
         }
 
-        flush_tlb_range(vma->vm_mm, vma->vm_start, vma->vm_end);
-        flush_tlb_range(src_vma->vm_mm, src_vma->vm_start, src_vma->vm_end);
+        flush_tlb_range(vma, vma->vm_start, vma->vm_end);
+        flush_tlb_range(src_vma, src_vma->vm_start, src_vma->vm_end);
         return 0;
 }
 

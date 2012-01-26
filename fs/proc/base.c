@@ -846,10 +846,10 @@ int mem_mmap(struct file * file, struct vm_area_struct * vma)
          have valid page information.)  We can't map shared memory at the
          moment because working out the vm_area_struct & nattach stuff isn't
          worth it. */
-
+#define VMOFF(x) (PAGE_SIZE * (x->vm_pgoff))
         src_vma = task->mm->mmap;
-        stmp = vma->vm_pgoff;
-        while (stmp < vma->vm_pgoff + (vma->vm_end - vma->vm_start)) {
+        stmp = VMOFF(vma);
+        while (stmp < VMOFF(vma) + (vma->vm_end - vma->vm_start)) {
                 while (src_vma && stmp > src_vma->vm_end)
                         src_vma = src_vma->vm_next;
                 if (!src_vma || (src_vma->vm_flags & VM_SHARED))
@@ -890,7 +890,7 @@ int mem_mmap(struct file * file, struct vm_area_struct * vma)
         }
 
         src_vma = task->mm->mmap;
-        stmp    = vma->vm_pgoff;
+        stmp    = VMOFF(vma);
         dtmp    = vma->vm_start;
 
         flush_cache_range(vma->vm_mm, vma->vm_start, vma->vm_end);

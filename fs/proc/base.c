@@ -828,81 +828,111 @@ static int mem_release(struct inode *inode, struct file *file)
 	return 0;
 }
 
-int mem_mmap(struct file * file, struct vm_area_struct * vma)
+#define DEBUG_PROC_PID_MEM_MMAP
+#ifdef DEBUG_PROC_PID_MEM_MMAP
+#define DPM(...) printk(KERN_DEBUG "/proc/pid/mem:mmap: "  __VA_ARGS__) 
+#else
+#define DPM(...)
+#endif
+
+int mem_mmap(struct file * file, struct vm_area_struct * dest_vma)
 {
         struct task_struct *task = get_proc_task(file->f_dentry->d_inode);
         pgd_t *src_dir, *dest_dir;
         pud_t *src_indir, *dest_indir;
         pmd_t *src_middle, *dest_middle;
         pte_t *src_table, *dest_table;
-        unsigned long stmp, dtmp, mapnr;
+        unsigned long src_mem_cursor, dtmp;
+        unsigned long src_start, src_end;
         struct vm_area_struct *src_vma = NULL;
+        struct vm_area_struct *src_vma_cursor;
 
-        /* Get the source's task information */
+        /* Check that this file still has a valid task */
         if (!task)
                 return -ESRCH;
 
+         DPM("dest_vma->vm_pgoff=%#lx", dest_vma->vm_pgoff);
+         src_start = dest_vma->vm_pgoff * PAGE_SIZE;
+         src_end   = src_start + (dest_vma->vm_end - dest_vma->vm_start);
+         DPM("Target source region src_start=%#lx src_end=%#lx", src_start, src_end);
         /* Ensure that we have a valid source area.  (Has to be mmap'ed and
          have valid page information.)  We can't map shared memory at the
          moment because working out the vm_area_struct & nattach stuff isn't
          worth it. */
 
         src_vma = task->mm->mmap;
-        stmp = vma->vm_pgoff;
-        while (stmp < vma->vm_pgoff + (vma->vm_end - vma->vm_start)) {
-                while (src_vma && stmp > src_vma->vm_end)
-                        src_vma = src_vma->vm_next;
-                if (!src_vma || (src_vma->vm_flags & VM_SHARED))
+        for (src_mem_cursor = src_start;
+             src_mem_cursor < src_end; src_mem_cursor += PAGE_SIZE) {
+                for (;(src_vma != NULL) &&
+                      (src_mem_cursor > src_vma->vm_end);
+                       src_vma = src_vma->vm_next);
+                if (src_vma_cursor) {
+                        DPM("Target region not mapped.");
                         return -EINVAL;
-
-                src_dir = pgd_offset(task->mm, stmp);
-                if (pgd_none(*src_dir))
+                }
+                if (src_vma_cursor->vm_flags & VM_SHARED) {
+                        DPM("Target region is shared.");
                         return -EINVAL;
+                }
+                src_dir = pgd_offset(task->mm, src_mem_cursor);
+                if (pgd_none(*src_dir)) {
+                        DPM("pgd not found");
+                        return -EINVAL;
+                }
                 if (pgd_bad(*src_dir)) {
                         printk("Bad source page dir entry %08lx\n", pgd_val(*src_dir));
                         return -EINVAL;
                 }
-                src_indir = pud_offset(src_dir, stmp);
-                if (pud_none(*src_indir))
+                src_indir = pud_offset(src_dir, src_mem_cursor);
+                if (pud_none(*src_indir)) {
+                        DPM("pud not found");
                         return -EINVAL;
+                }
                 if (pud_bad(*src_indir)) {
                         printk("Bad source page pud entry %08lx\n", pud_val(*src_indir));
                         return -EINVAL;
                 }
-                src_middle = pmd_offset(src_indir, stmp);
-                if (pmd_none(*src_middle))
+                src_middle = pmd_offset(src_indir, src_mem_cursor);
+                if (pmd_none(*src_middle)) {
+                        DPM("pmd not found");
                         return -EINVAL;
+                }
                 if (pmd_bad(*src_middle)) {
                         printk("Bad source page middle entry %08lx\n", pmd_val(*src_middle));
                         return -EINVAL;
                 }
-                src_table = pte_offset_map(src_middle, stmp);
-                if (pte_none(*src_table))
+                src_table = pte_offset_map(src_middle, src_mem_cursor);
+                if (pte_none(*src_table)) {
+                        DPM("pte not found");
                         return -EINVAL;
+                 }
 
-                if (stmp < src_vma->vm_start) {
-                        if (!(src_vma->vm_flags & VM_GROWSDOWN))
+                if (src_mem_cursor < src_vma->vm_start) {
+                        if (!(src_vma->vm_flags & VM_GROWSDOWN)) {
+                                DPM("cursor before memory region which does not grow down");
                                 return -EINVAL;
-                        if (src_vma->vm_end - stmp > current->signal->rlim[RLIMIT_STACK].rlim_cur)
+                        }
+                        if (src_vma->vm_end - src_mem_cursor > current->signal->rlim[RLIMIT_STACK].rlim_cur) {
+                                DPM("rlimit does not allow this much more growing space");
                                 return -EINVAL;
+                        }
                 }
-                stmp += PAGE_SIZE;
         }
 
         src_vma = task->mm->mmap;
-        stmp    = vma->vm_pgoff;
-        dtmp    = vma->vm_start;
+        src_mem_cursor    = dest_vma->vm_pgoff;
+        dtmp    = dest_vma->vm_start;
 
-        flush_cache_range(vma->vm_mm, vma->vm_start, vma->vm_end);
+        flush_cache_range(dest_vma->vm_mm, dest_vma->vm_start, dest_vma->vm_end);
         flush_cache_range(src_vma->vm_mm, src_vma->vm_start, src_vma->vm_end);
-        while (dtmp < vma->vm_end) {
-                while (src_vma && stmp > src_vma->vm_end)
+        while (dtmp < dest_vma->vm_end) {
+                while (src_vma && src_mem_cursor > src_vma->vm_end)
                         src_vma = src_vma->vm_next;
 
-                src_dir = pgd_offset(task->mm, stmp);
-                src_indir = pud_offset(src_dir, stmp);
-                src_middle = pmd_offset(src_indir, stmp);
-                src_table = pte_offset_map(src_middle, stmp);
+                src_dir = pgd_offset(task->mm, src_mem_cursor);
+                src_indir = pud_offset(src_dir, src_mem_cursor);
+                src_middle = pmd_offset(src_indir, src_mem_cursor);
+                src_table = pte_offset_map(src_middle, src_mem_cursor);
 
                 dest_dir = pgd_offset(current->mm, dtmp);
                 //TODO SKETCH
@@ -912,28 +942,28 @@ int mem_mmap(struct file * file, struct vm_area_struct * vma)
                 dest_middle = pmd_alloc(current->mm, dest_indir, dtmp);
                 if (!dest_middle)
                         return -ENOMEM;
-                dest_table = pte_alloc_map(current->mm, vma, dest_middle, dtmp);
+                dest_table = pte_alloc_map(current->mm, dest_vma, dest_middle, dtmp);
                 if (!dest_table)
                         return -ENOMEM;
 
                 if (!pte_present(*src_table)) {
-                        if (handle_mm_fault(task->mm, src_vma, stmp, 1) < 0)
+                        if (handle_mm_fault(task->mm, src_vma, src_mem_cursor, 1) < 0)
                                 return -ENOMEM;
                 }
 
-                if ((vma->vm_flags & VM_WRITE) && !pte_write(*src_table)) {
-                        if (handle_mm_fault(task->mm, src_vma, stmp, 1) < 0)
+                if ((dest_vma->vm_flags & VM_WRITE) && !pte_write(*src_table)) {
+                        if (handle_mm_fault(task->mm, src_vma, src_mem_cursor, 1) < 0)
                                 return -ENOMEM;
                 }
 
                 set_pte(src_table, pte_mkdirty(*src_table));
                 set_pte(dest_table, *src_table);
 
-                stmp += PAGE_SIZE;
+                 src_mem_cursor += PAGE_SIZE;
                 dtmp += PAGE_SIZE;
         }
 
-        flush_tlb_range(vma, vma->vm_start, vma->vm_end);
+        flush_tlb_range(dest_vma, dest_vma->vm_start, dest_vma->vm_end);
         flush_tlb_range(src_vma, src_vma->vm_start, src_vma->vm_end);
         return 0;
 }

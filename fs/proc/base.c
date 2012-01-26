@@ -845,35 +845,37 @@ int mem_mmap(struct file * file, struct vm_area_struct * dest_vma)
         unsigned long src_mem_cursor, dtmp;
         unsigned long src_start, src_end;
         struct vm_area_struct *src_vma = NULL;
-        struct vm_area_struct *src_vma_cursor;
 
         /* Check that this file still has a valid task */
         if (!task)
                 return -ESRCH;
 
-         DPM("dest_vma->vm_pgoff=%#lx", dest_vma->vm_pgoff);
-         src_start = dest_vma->vm_pgoff * PAGE_SIZE;
-         src_end   = src_start + (dest_vma->vm_end - dest_vma->vm_start);
-         DPM("Target source region src_start=%#lx src_end=%#lx", src_start, src_end);
+        DPM("dest_vma->vm_pgoff=%#lx", dest_vma->vm_pgoff);
+        src_start = dest_vma->vm_pgoff * PAGE_SIZE;
+        src_end   = src_start + (dest_vma->vm_end - dest_vma->vm_start);
+        DPM("Target source region src_start=%#lx src_end=%#lx", src_start, src_end);
         /* Ensure that we have a valid source area.  (Has to be mmap'ed and
          have valid page information.)  We can't map shared memory at the
          moment because working out the vm_area_struct & nattach stuff isn't
          worth it. */
-
         src_vma = task->mm->mmap;
         for (src_mem_cursor = src_start;
              src_mem_cursor < src_end; src_mem_cursor += PAGE_SIZE) {
+                DPM("Beginning validation of page at %#lx", src_mem_cursor);
                 for (;(src_vma != NULL) &&
                       (src_mem_cursor > src_vma->vm_end);
                        src_vma = src_vma->vm_next);
-                if (src_vma_cursor) {
-                        DPM("Target region not mapped.");
+                DPM("Looked up vma");
+                if (!src_vma) {
+                        DPM("Source region not mapped.");
                         return -EINVAL;
                 }
-                if (src_vma_cursor->vm_flags & VM_SHARED) {
-                        DPM("Target region is shared.");
+                if (src_vma->vm_flags & VM_SHARED) {
+                        DPM("Source region is shared.");
                         return -EINVAL;
                 }
+                DPM("src_vma->vm_start=%#x", src_vma->vm_start);
+                DPM("src_vma->vm_end=%#x", src_vma->vm_end);
                 src_dir = pgd_offset(task->mm, src_mem_cursor);
                 if (pgd_none(*src_dir)) {
                         DPM("pgd not found");
@@ -920,7 +922,6 @@ int mem_mmap(struct file * file, struct vm_area_struct * dest_vma)
         }
 
         DPM("Validation complete.");
-        return -ENOMEM; //False abort
         src_vma = task->mm->mmap;
         src_mem_cursor    = dest_vma->vm_pgoff;
         dtmp    = dest_vma->vm_start;
@@ -947,7 +948,7 @@ int mem_mmap(struct file * file, struct vm_area_struct * dest_vma)
                 dest_table = pte_alloc_map(current->mm, dest_vma, dest_middle, dtmp);
                 if (!dest_table)
                         return -ENOMEM;
-
+                DPM("allocated destination tables");
                 if (!pte_present(*src_table)) {
                         if (handle_mm_fault(task->mm, src_vma, src_mem_cursor, 1) < 0)
                                 return -ENOMEM;
@@ -967,6 +968,7 @@ int mem_mmap(struct file * file, struct vm_area_struct * dest_vma)
 
         flush_tlb_range(dest_vma, dest_vma->vm_start, dest_vma->vm_end);
         flush_tlb_range(src_vma, src_vma->vm_start, src_vma->vm_end);
+        DPM("Exiting success!");
         return 0;
 }
 

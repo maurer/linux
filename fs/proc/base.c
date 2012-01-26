@@ -919,6 +919,8 @@ int mem_mmap(struct file * file, struct vm_area_struct * dest_vma)
                 }
         }
 
+        DPM("Validation complete.");
+        return -ENOMEM; //False abort
         src_vma = task->mm->mmap;
         src_mem_cursor    = dest_vma->vm_pgoff;
         dtmp    = dest_vma->vm_start;

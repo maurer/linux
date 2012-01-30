@@ -845,13 +845,19 @@ int mem_mmap(struct file * file, struct vm_area_struct * dest_vma)
         unsigned long src_mem_cursor, dtmp;
         unsigned long src_start, src_end;
         struct vm_area_struct *src_vma = NULL;
-
+        struct vm_fault vmf;
+        struct page page;
+        int ret;
+        vmf.flags = 0; //TODO this entire code is clearly NONLINEAR Incompatible...
         /* Check that this file still has a valid task */
         if (!task)
                 return -ESRCH;
 
         DPM("dest_vma->vm_pgoff=%#lx", dest_vma->vm_pgoff);
+        vmf.pgoff = 0; //dest_vma->vm_pgoff;
         src_start = dest_vma->vm_pgoff * PAGE_SIZE;
+        vmf.virtual_address = (__user void*)src_start;
+        vmf.page = &page; //TODO Ha! Ha! this shouldn't work.
         src_end   = src_start + (dest_vma->vm_end - dest_vma->vm_start);
         DPM("Target source region src_start=%#lx src_end=%#lx", src_start, src_end);
         /* Ensure that we have a valid source area.  (Has to be mmap'ed and
@@ -874,8 +880,17 @@ int mem_mmap(struct file * file, struct vm_area_struct * dest_vma)
                         DPM("Source region is shared.");
                         return -EINVAL;
                 }
-                DPM("src_vma->vm_start=%#x", src_vma->vm_start);
-                DPM("src_vma->vm_end=%#x", src_vma->vm_end);
+                DPM("src_vma->vm_start=%#lx", src_vma->vm_start);
+                DPM("src_vma->vm_end=%#lx", src_vma->vm_end);
+                //TODO do this only when needed
+                DPM("Attempting to force mapping");
+                //ret = src_vma->vm_ops->fault(src_vma, &vmf);
+                DPM("Fault result: %#x", ret);
+                if (unlikely(ret & VM_FAULT_ERROR)) {
+                        DPM("Failed to fault in target page: %#lx", src_mem_cursor);
+                        return -ret;
+                }
+                DPM("Fault successful.");
                 src_dir = pgd_offset(task->mm, src_mem_cursor);
                 if (pgd_none(*src_dir)) {
                         DPM("pgd not found");
@@ -908,6 +923,7 @@ int mem_mmap(struct file * file, struct vm_area_struct * dest_vma)
                         DPM("pte not found");
                         return -EINVAL;
                  }
+                 DPM("PTE believed valid: %#lx", pte_val(*src_table));
 
                 if (src_mem_cursor < src_vma->vm_start) {
                         if (!(src_vma->vm_flags & VM_GROWSDOWN)) {
@@ -919,11 +935,14 @@ int mem_mmap(struct file * file, struct vm_area_struct * dest_vma)
                                 return -EINVAL;
                         }
                 }
+                vmf.pgoff++;
+                vmf.virtual_address += PAGE_SIZE;
+                
         }
 
         DPM("Validation complete.");
         src_vma = task->mm->mmap;
-        src_mem_cursor    = dest_vma->vm_pgoff;
+        src_mem_cursor = src_start;
         dtmp    = dest_vma->vm_start;
 
         flush_cache_range(dest_vma->vm_mm, dest_vma->vm_start, dest_vma->vm_end);
@@ -936,33 +955,46 @@ int mem_mmap(struct file * file, struct vm_area_struct * dest_vma)
                 src_indir = pud_offset(src_dir, src_mem_cursor);
                 src_middle = pmd_offset(src_indir, src_mem_cursor);
                 src_table = pte_offset_map(src_middle, src_mem_cursor);
-
+                DPM("pte_val(*src_table)=%#llx", pte_val(*src_table));
                 dest_dir = pgd_offset(current->mm, dtmp);
                 //TODO SKETCH
-                dest_indir = pud_alloc(current->mm, dest_dir, dtmp);
+                dest_indir = pud_offset(dest_dir, dtmp);
                 if (!dest_indir)
                         return -ENOMEM;
-                dest_middle = pmd_alloc(current->mm, dest_indir, dtmp);
+                dest_middle = pmd_offset(dest_indir, dtmp);
                 if (!dest_middle)
                         return -ENOMEM;
-                dest_table = pte_alloc_map(current->mm, dest_vma, dest_middle, dtmp);
+                dest_table = pte_offset_map(dest_middle, dtmp);
                 if (!dest_table)
                         return -ENOMEM;
                 DPM("allocated destination tables");
                 if (!pte_present(*src_table)) {
+                        DPM("Page not present, attempting to fault it into place.");
                         if (handle_mm_fault(task->mm, src_vma, src_mem_cursor, 1) < 0)
                                 return -ENOMEM;
                 }
 
                 if ((dest_vma->vm_flags & VM_WRITE) && !pte_write(*src_table)) {
+                        DPM("Page not writable, attempting to fault it into place.");
                         if (handle_mm_fault(task->mm, src_vma, src_mem_cursor, 1) < 0)
                                 return -ENOMEM;
                 }
 
+                DPM("Copying pagetable");
                 set_pte(src_table, pte_mkdirty(*src_table));
                 set_pte(dest_table, *src_table);
+                DPM("Checking equivalence");
+                BUG_ON(!pte_same(*src_table, *dest_table));
+                DPM("Fetching backing page");
+                struct page* src_page = pte_page(*src_table);
+                DPM("Got page %p", src_page);
+                DPM("Incrementing page usage counter");
+                get_page(src_page);
+                //TODO there is probably a better function for this
+                atomic_inc(&src_page->_mapcount);
+                DPM("Page mapped");
 
-                 src_mem_cursor += PAGE_SIZE;
+                src_mem_cursor += PAGE_SIZE;
                 dtmp += PAGE_SIZE;
         }
 

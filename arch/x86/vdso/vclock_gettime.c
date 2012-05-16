@@ -156,21 +156,21 @@ notrace static noinline int do_monotonic_coarse(struct timespec *ts)
 
 notrace int __vdso_clock_gettime(clockid_t clock, struct timespec *ts)
 {
-	switch (clock) {
-	case CLOCK_REALTIME:
-		if (likely(gtod->clock.vclock_mode != VCLOCK_NONE))
-			return do_realtime(ts);
-		break;
-	case CLOCK_MONOTONIC:
-		if (likely(gtod->clock.vclock_mode != VCLOCK_NONE))
-			return do_monotonic(ts);
-		break;
-	case CLOCK_REALTIME_COARSE:
-		return do_realtime_coarse(ts);
-	case CLOCK_MONOTONIC_COARSE:
-		return do_monotonic_coarse(ts);
-	}
-
+        if (likely(gtod->sysctl_enabled))
+        	switch (clock) {
+        	case CLOCK_REALTIME:
+	        	if (likely(gtod->clock.vclock_mode != VCLOCK_NONE))
+		        	return do_realtime(ts);
+        		break;
+	        case CLOCK_MONOTONIC:
+		        if (likely(gtod->clock.vclock_mode != VCLOCK_NONE))
+			        return do_monotonic(ts);
+               		break;
+               	case CLOCK_REALTIME_COARSE:
+	        	return do_realtime_coarse(ts);
+        	case CLOCK_MONOTONIC_COARSE:
+	        	return do_monotonic_coarse(ts);
+	        }
 	return vdso_fallback_gettime(clock, ts);
 }
 int clock_gettime(clockid_t, struct timespec *)
@@ -201,14 +201,27 @@ notrace int __vdso_gettimeofday(struct timeval *tv, struct timezone *tz)
 int gettimeofday(struct timeval *, struct timezone *)
 	__attribute__((weak, alias("__vdso_gettimeofday")));
 
-/*
- * This will break when the xtime seconds get inaccurate, but that is
- * unlikely
- */
+/* This will break when the xtime seconds get inaccurate, but that is
+ * unlikely */
+
+static __always_inline long time_syscall(long *t)
+{
+	long secs;
+	asm volatile("syscall"
+		     : "=a" (secs)
+		     : "0" (__NR_time), "D" (t) : "cc", "r11", "cx", "memory");
+	return secs;
+}
+
 notrace time_t __vdso_time(time_t *t)
 {
+	time_t result;
+
+	if (unlikely(!VVAR(vsyscall_gtod_data).sysctl_enabled))
+		return time_syscall(t);
+
 	/* This is atomic on x86_64 so we don't need any locks. */
-	time_t result = ACCESS_ONCE(VVAR(vsyscall_gtod_data).wall_time_sec);
+	result = ACCESS_ONCE(VVAR(vsyscall_gtod_data).wall_time_sec);
 
 	if (t)
 		*t = result;

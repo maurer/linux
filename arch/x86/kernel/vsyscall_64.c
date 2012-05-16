@@ -55,6 +55,7 @@ DEFINE_VVAR(int, vgetcpu_mode);
 DEFINE_VVAR(struct vsyscall_gtod_data, vsyscall_gtod_data) =
 {
 	.lock = __SEQLOCK_UNLOCKED(__vsyscall_gtod_data.lock),
+	.sysctl_enabled = 1,
 };
 
 static enum { EMULATE, NATIVE, NONE } vsyscall_mode = EMULATE;
@@ -165,7 +166,18 @@ static bool write_ok_or_segv(unsigned long ptr, size_t size)
 		return false;
 	} else {
 		return true;
-	}
+        }
+}
+
+#define __syscall_clobber "r11","rcx","memory"
+
+static __always_inline long time_syscall(long *t)
+{
+	long secs;
+	asm volatile("syscall"
+		: "=a" (secs)
+		: "0" (__NR_time),"D" (t) : __syscall_clobber);
+	return secs;
 }
 
 bool emulate_vsyscall(struct pt_regs *regs, unsigned long address)
@@ -283,10 +295,25 @@ sigsegv:
 	return true;
 }
 
-/*
- * Assume __initcall executes before all user space. Hopefully kmod
- * doesn't violate that. We'll find out if it does.
- */
+#ifdef CONFIG_SYSCTL
+static ctl_table kernel_table2[] = {
+	{ .procname = "vsyscall64",
+	  .data = &vsyscall_gtod_data.sysctl_enabled, .maxlen = sizeof(int),
+	  .mode = 0644,
+	  .proc_handler = proc_dointvec },
+	{}
+};
+
+static ctl_table kernel_root_table2[] = {
+	{ .procname = "kernel", .mode = 0555,
+	  .child = kernel_table2 },
+	{}
+};
+#endif
+
+/* Assume __initcall executes before all user space. Hopefully kmod
+   doesn't violate that. We'll find out if it does. */
+
 static void __cpuinit vsyscall_set_cpu(int cpu)
 {
 	unsigned long d;
@@ -348,7 +375,9 @@ void __init map_vsyscall(void)
 static int __init vsyscall_init(void)
 {
 	BUG_ON(VSYSCALL_ADDR(0) != __fix_to_virt(VSYSCALL_FIRST_PAGE));
-
+#ifdef CONFIG_SYSCTL
+	register_sysctl_table(kernel_root_table2);
+#endif
 	on_each_cpu(cpu_vsyscall_init, NULL, 1);
 	/* notifier priority > KVM */
 	hotcpu_notifier(cpu_vsyscall_notifier, 30);

@@ -42,10 +42,17 @@ define_panicking_intrinsics!("`f32` should not be used", {
     __lesf2,
     __nesf2,
     __unordsf2,
+    __addsf3,
+    __mulsf3,
+    __ltsf2,
 });
 
 define_panicking_intrinsics!("`f64` should not be used", {
     __unorddf2,
+    __ledf2,
+    __adddf3,
+    __muldf3,
+    __ltdf2,
 });
 
 define_panicking_intrinsics!("`i128` should not be used", {

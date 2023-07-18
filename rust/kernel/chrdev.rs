@@ -160,7 +160,7 @@ impl<const N: usize> Registration<{ N }> {
             });
         }
 
-        let mut inner = this.inner.as_mut().unwrap();
+        let inner = this.inner.as_mut().unwrap();
         if inner.used == N {
             return Err(EINVAL);
         }

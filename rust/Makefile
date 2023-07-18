@@ -400,7 +400,8 @@ redirect-intrinsics = \
 	__unorddf2 \
 	__muloti4 __multi3 \
 	__udivmodti4 __udivti3 __umodti3 \
-	__aeabi_fcmpeq __aeabi_fcmpun __aeabi_dcmpun __aeabi_uldivmod
+	__aeabi_fcmpeq __aeabi_fcmpun __aeabi_dcmpun __aeabi_uldivmod \
+	__ledf2 __adddf3 __muldf3 __ltdf2 __addsf3 __mulsf3 __ltsf2
 
 ifneq ($(or $(CONFIG_ARM64),$(and $(CONFIG_RISCV),$(CONFIG_64BIT))),)
 	# These intrinsics are defined for ARM64 and RISCV64

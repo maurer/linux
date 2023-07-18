@@ -428,7 +428,7 @@ impl Registration {
             return Err(EINVAL);
         }
 
-        let mut fs = this.fs.get_mut();
+        let fs = this.fs.get_mut();
         fs.owner = module.0;
         fs.name = T::NAME.as_char_ptr();
         fs.fs_flags = T::FLAGS;

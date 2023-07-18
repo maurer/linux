@@ -657,7 +657,7 @@ int rust_helper_fs_parse(struct fs_context *fc,
 EXPORT_SYMBOL_GPL(rust_helper_fs_parse);
 
 /*
- * We use `bindgen`'s `--size_t-is-usize` option to bind the C `size_t` type
+ * `bindgen` assumes that it can bind the C `size_t` type
  * as the Rust `usize` type, so we can use it in contexts where Rust
  * expects a `usize` like slice (array) indices. `usize` is defined to be
  * the same as C's `uintptr_t` type (can hold any pointer) but not
@@ -668,8 +668,8 @@ EXPORT_SYMBOL_GPL(rust_helper_fs_parse);
  * integer-overflow issues.
  *
  * If your platform fails this assertion, it means that you are in
- * danger of integer-overflow bugs (even if you attempt to remove
- * `--size_t-is-usize`). It may be easiest to change the kernel ABI on
+ * danger of integer-overflow bugs (even if you attempt to set
+ * `--no-size_t-is-usize`). It may be easiest to change the kernel ABI on
  * your platform such that `size_t` matches `uintptr_t` (i.e., to increase
  * `size_t`, because `uintptr_t` has to be at least as big as `size_t`).
  */

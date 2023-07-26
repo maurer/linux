@@ -761,6 +761,7 @@ config CFI_CLANG
 	bool "Use Clang's Control Flow Integrity (CFI)"
 	depends on ARCH_SUPPORTS_CFI_CLANG
 	depends on $(cc-option,-fsanitize=kcfi)
+	depends on !RUST || $(cc-option,-fsanitize=kcfi,-fsanitize-cfi-icall-experimental-normalize-integers)
 	help
 	  This option enables Clang’s forward-edge Control Flow Integrity
 	  (CFI) checking, where the compiler injects a runtime check to each

@@ -63,7 +63,7 @@ impl PollTable {
 
     /// Register this [`PollTable`] with the provided [`PollCondVar`], so that it can be notified
     /// using the condition variable.
-    pub fn register_wait(&mut self, file: &File, cv: &PollCondVar) {
+    pub fn register_wait<P>(&mut self, file: &File<P>, cv: &PollCondVar) {
         if let Some(qproc) = self.get_qproc() {
             // SAFETY: The pointers to `file` and `self` need to be valid for the duration of this
             // call to `qproc`, which they are because they are references.

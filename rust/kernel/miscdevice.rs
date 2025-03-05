@@ -112,10 +112,10 @@ pub trait MiscDevice: Sized {
     /// Called when the misc device is opened.
     ///
     /// The returned pointer will be stored as the private data for the file.
-    fn open(_file: &File, _misc: &MiscDeviceRegistration<Self>) -> Result<Self::Ptr>;
+    fn open(_file: &File<MiscDeviceRegistration<Self>>, _misc: &MiscDeviceRegistration<Self>) -> Result<Self::Ptr>;
 
     /// Called when the misc device is released.
-    fn release(device: Self::Ptr, _file: &File) {
+    fn release(device: Self::Ptr, _file: &File<MiscDeviceRegistration<Self>>) {
         drop(device);
     }
 
@@ -126,7 +126,7 @@ pub trait MiscDevice: Sized {
     /// [`kernel::ioctl`]: mod@crate::ioctl
     fn ioctl(
         _device: <Self::Ptr as ForeignOwnable>::Borrowed<'_>,
-        _file: &File,
+        _file: &File<MiscDeviceRegistration<Self>>,
         _cmd: u32,
         _arg: usize,
     ) -> Result<isize> {
@@ -143,7 +143,7 @@ pub trait MiscDevice: Sized {
     #[cfg(CONFIG_COMPAT)]
     fn compat_ioctl(
         _device: <Self::Ptr as ForeignOwnable>::Borrowed<'_>,
-        _file: &File,
+        _file: &File<MiscDeviceRegistration<Self>>,
         _cmd: u32,
         _arg: usize,
     ) -> Result<isize> {
@@ -154,7 +154,7 @@ pub trait MiscDevice: Sized {
     fn show_fdinfo(
         _device: <Self::Ptr as ForeignOwnable>::Borrowed<'_>,
         _m: &SeqFile,
-        _file: &File,
+        _file: &File<MiscDeviceRegistration<Self>>,
     ) {
         build_error!(VTABLE_DEFAULT_ERROR)
     }

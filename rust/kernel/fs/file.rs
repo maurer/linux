@@ -176,21 +176,22 @@ pub mod flags {
 /// * There must not be any active calls to `fdget_pos` on this file that did not take the
 ///   `f_pos_lock` mutex.
 #[repr(transparent)]
-pub struct File {
+pub struct File<P> {
     inner: Opaque<bindings::file>,
+    phantom: core::marker::PhantomData<*mut P>,
 }
 
 // SAFETY: This file is known to not have any active `fdget_pos` calls that did not take the
 // `f_pos_lock` mutex, so it is safe to transfer it between threads.
-unsafe impl Send for File {}
+unsafe impl<P: Send> Send for File<P> {}
 
 // SAFETY: This file is known to not have any active `fdget_pos` calls that did not take the
 // `f_pos_lock` mutex, so it is safe to access its methods from several threads in parallel.
-unsafe impl Sync for File {}
+unsafe impl<P: Sync> Sync for File<P> {}
 
 // SAFETY: The type invariants guarantee that `File` is always ref-counted. This implementation
 // makes `ARef<File>` own a normal refcount.
-unsafe impl AlwaysRefCounted for File {
+unsafe impl<P> AlwaysRefCounted for File<P> {
     #[inline]
     fn inc_ref(&self) {
         // SAFETY: The existence of a shared reference means that the refcount is nonzero.
@@ -198,7 +199,7 @@ unsafe impl AlwaysRefCounted for File {
     }
 
     #[inline]
-    unsafe fn dec_ref(obj: ptr::NonNull<File>) {
+    unsafe fn dec_ref(obj: ptr::NonNull<Self>) {
         // SAFETY: To call this method, the caller passes us ownership of a normal refcount, so we
         // may drop it. The cast is okay since `File` has the same representation as `struct file`.
         unsafe { bindings::fput(obj.cast().as_ptr()) }
@@ -219,13 +220,14 @@ unsafe impl AlwaysRefCounted for File {
 ///   must be on the same thread as this file.
 ///
 /// [`assume_no_fdget_pos`]: LocalFile::assume_no_fdget_pos
-pub struct LocalFile {
+pub struct LocalFile<P> {
     inner: Opaque<bindings::file>,
+    phantom: core::marker::PhantomData<*mut P>,
 }
 
 // SAFETY: The type invariants guarantee that `LocalFile` is always ref-counted. This implementation
 // makes `ARef<File>` own a normal refcount.
-unsafe impl AlwaysRefCounted for LocalFile {
+unsafe impl<P> AlwaysRefCounted for LocalFile<P> {
     #[inline]
     fn inc_ref(&self) {
         // SAFETY: The existence of a shared reference means that the refcount is nonzero.
@@ -233,14 +235,14 @@ unsafe impl AlwaysRefCounted for LocalFile {
     }
 
     #[inline]
-    unsafe fn dec_ref(obj: ptr::NonNull<LocalFile>) {
+    unsafe fn dec_ref(obj: ptr::NonNull<Self>) {
         // SAFETY: To call this method, the caller passes us ownership of a normal refcount, so we
         // may drop it. The cast is okay since `File` has the same representation as `struct file`.
         unsafe { bindings::fput(obj.cast().as_ptr()) }
     }
 }
 
-impl LocalFile {
+impl<P> LocalFile<P> {
     /// Constructs a new `struct file` wrapper from a file descriptor.
     ///
     /// The file descriptor belongs to the current process, and there might be active local calls
@@ -250,7 +252,7 @@ impl LocalFile {
     ///
     /// [`assume_no_fdget_pos`]: LocalFile::assume_no_fdget_pos
     #[inline]
-    pub fn fget(fd: u32) -> Result<ARef<LocalFile>, BadFdError> {
+    pub fn fget(fd: u32) -> Result<ARef<LocalFile<P>>, BadFdError> {
         // SAFETY: FFI call, there are no requirements on `fd`.
         let ptr = ptr::NonNull::new(unsafe { bindings::fget(fd) }).ok_or(BadFdError)?;
 
@@ -270,12 +272,15 @@ impl LocalFile {
     ///   positive for the duration of 'a.
     /// * The caller must ensure that if there is an active call to `fdget_pos` that did not take
     ///   the `f_pos_lock` mutex, then that call is on the current thread.
+    /// * The caller must ensure that `P` is the type pointed to by the file's `private_data` or
+    ///   `()`.
     #[inline]
-    pub unsafe fn from_raw_file<'a>(ptr: *const bindings::file) -> &'a LocalFile {
+    pub unsafe fn from_raw_file<'a>(ptr: *const bindings::file) -> &'a LocalFile<P> {
         // SAFETY: The caller guarantees that the pointer is not dangling and stays valid for the
         // duration of 'a. The cast is okay because `File` is `repr(transparent)`.
         //
         // INVARIANT: The caller guarantees that there are no problematic `fdget_pos` calls.
+        // INVARIANT: The caller guarantees that `P` matches `private_data`'s pointee or is `()`
         unsafe { &*ptr.cast() }
     }
 
@@ -294,7 +299,7 @@ impl LocalFile {
     ///
     /// There must not be any active `fdget_pos` calls on the current thread.
     #[inline]
-    pub unsafe fn assume_no_fdget_pos(me: ARef<LocalFile>) -> ARef<File> {
+    pub unsafe fn assume_no_fdget_pos(me: ARef<Self>) -> ARef<File<P>> {
         // INVARIANT: There are no `fdget_pos` calls on the current thread, and by the type
         // invariants, if there is a `fdget_pos` call on another thread, then it took the
         // `f_pos_lock` mutex.
@@ -335,7 +340,7 @@ impl LocalFile {
     }
 }
 
-impl File {
+impl<P> File<P> {
     /// Creates a reference to a [`File`] from a valid pointer.
     ///
     /// # Safety
@@ -344,27 +349,32 @@ impl File {
     ///   positive for the duration of 'a.
     /// * The caller must ensure that if there are active `fdget_pos` calls on this file, then they
     ///   took the `f_pos_lock` mutex.
+    /// * The caller must ensure that `P` is the type pointed to by the file's `private_data` or
+    ///   `()`.
     #[inline]
-    pub unsafe fn from_raw_file<'a>(ptr: *const bindings::file) -> &'a File {
+    pub unsafe fn from_raw_file<'a>(ptr: *const bindings::file) -> &'a Self {
         // SAFETY: The caller guarantees that the pointer is not dangling and stays valid for the
         // duration of 'a. The cast is okay because `File` is `repr(transparent)`.
         //
         // INVARIANT: The caller guarantees that there are no problematic `fdget_pos` calls.
+        // INVARIANT: The caller guarantees that `P` matches `private_data`'s pointee or is `()`
         unsafe { &*ptr.cast() }
     }
 }
 
 // Make LocalFile methods available on File.
-impl core::ops::Deref for File {
-    type Target = LocalFile;
+impl<P> core::ops::Deref for File<P> {
+    type Target = LocalFile<P>;
     #[inline]
-    fn deref(&self) -> &LocalFile {
+    fn deref(&self) -> &LocalFile<P> {
         // SAFETY: The caller provides a `&File`, and since it is a reference, it must point at a
         // valid file for the desired duration.
         //
         // By the type invariants, there are no `fdget_pos` calls that did not take the
         // `f_pos_lock` mutex.
-        unsafe { LocalFile::from_raw_file(self as *const File as *const bindings::file) }
+        //
+        // By the type invariants, we already have an appropriate `P`.
+        unsafe { LocalFile::from_raw_file(self as *const File<P> as *const bindings::file) }
     }
 }
 
@@ -413,7 +423,7 @@ impl FileDescriptorReservation {
     ///
     /// The previously reserved file descriptor is bound to `file`. This method consumes the
     /// [`FileDescriptorReservation`], so it will not be usable after this call.
-    pub fn fd_install(self, file: ARef<File>) {
+    pub fn fd_install<P>(self, file: ARef<File<P>>) {
         // SAFETY: `self.fd` was previously returned by `get_unused_fd_flags`. We have not yet used
         // the fd, so it is still valid, and `current` still refers to the same task, as this type
         // cannot be moved across task boundaries.

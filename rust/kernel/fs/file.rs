@@ -36,6 +36,8 @@ use crate::{
 };
 use core::ptr;
 
+pub mod operations;
+
 /// Flags associated with a [`File`].
 pub mod flags {
     /// File is opened in append mode.

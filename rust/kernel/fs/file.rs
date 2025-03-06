@@ -6,12 +6,33 @@
 //!
 //! C headers: [`include/linux/fs.h`](srctree/include/linux/fs.h) and
 //! [`include/linux/file.h`](srctree/include/linux/file.h)
+//!
+//! A C `struct file *` can indicate many things. The ones we currently model are:
+//! * `File<()>` - A file with unknown or don't-care private data
+//! * `P: ForeignOwned`, `File<P>` - A file with known private data which owns its private data.
+//! * `File<Outlives<T>>` - A file with known private data, where the private data is known to
+//!   outlive the file.
+//! * `LocalFile<P>` - A degraded version of `File` which is not `Sync` or `Send`. This gives no
+//!   additional powers relative to `File`, but helps to correctly respect `fdget_pos`
+//!   optimizations.
+//! * `InitFile<'a, P>` - A unique pointer to a file, borrrowed from another source. This
+//!   type is provided in order to handle circumstances where code is setting up the file, but does
+//!   not have the privilege to discard it. This type allows *mutation*, including changing the
+//!   type of the `private_data` field. The common use case for this is implementing `open`,
+//!   which will provide a file pointer that is guaranteed not in use by anyone else for
+//!   initialization. The caller of the `open` implementation expects this to always remain valid
+//!   after the call. This type is *not* `AlwaysRefCounted` to preserve its uniqueness.
+//!   TODO edit summary
+//! * `RawFile` - A basic file that does not know its private data, is not send or sync, and does
+//!   not implement `AlwaysRefCounted`. All other files can degrade to this type to access basic
+//!   methods present on all file-like objects.
 
+use crate::ffi::c_void;
 use crate::{
     bindings,
     cred::Credential,
     error::{code::*, Error, Result},
-    types::{ARef, AlwaysRefCounted, NotThreadSafe, Opaque},
+    types::{ARef, AlwaysRefCounted, NotThreadSafe, ForeignOwnable, Opaque},
 };
 use core::ptr;
 
@@ -175,10 +196,29 @@ pub mod flags {
 /// * All instances of this type are refcounted using the `f_count` field.
 /// * There must not be any active calls to `fdget_pos` on this file that did not take the
 ///   `f_pos_lock` mutex.
+/// * P must either be `()` (unknown/unmodeled) or a type for which `private_data` is compatible
+///   with the representation used by `<P as ForeignOwnable>`.
 #[repr(transparent)]
 pub struct File<P> {
     inner: Opaque<bindings::file>,
-    phantom: core::marker::PhantomData<*mut P>,
+    phantom: core::marker::PhantomData<P>,
+}
+
+/// Wrap the target type in this if it's a pointer to a data structure which is guaranteed to
+/// outlive the file itself, e.g. driver static data
+pub struct Outlives<T>(core::marker::PhantomData<*const T>);
+
+mod sealed {
+    pub trait Sealed {}
+}
+/// Trait for types representing a reference which outlives the dynamic scope of the file
+pub trait OutlivesRef: sealed::Sealed {
+    /// Target this derefs to
+    type Target;
+}
+impl<T> sealed::Sealed for Outlives<T> {}
+impl<T> OutlivesRef for Outlives<T> {
+    type Target = T;
 }
 
 // SAFETY: This file is known to not have any active `fdget_pos` calls that did not take the
@@ -218,11 +258,15 @@ unsafe impl<P> AlwaysRefCounted for File<P> {
 /// * All instances of this type are refcounted using the `f_count` field.
 /// * If there is an active call to `fdget_pos` that did not take the `f_pos_lock` mutex, then it
 ///   must be on the same thread as this file.
+/// * P must either be `()` (unknown/unmodeled) or a type for which `private_data` is compatible
+///   with the representation used by `<P as ForeignOwnable>`
 ///
 /// [`assume_no_fdget_pos`]: LocalFile::assume_no_fdget_pos
 pub struct LocalFile<P> {
+    // The casts to convert this to a RawFile implicitly use this field.
+    #[allow(dead_code)]
     inner: Opaque<bindings::file>,
-    phantom: core::marker::PhantomData<*mut P>,
+    phantom: core::marker::PhantomData<P>,
 }
 
 // SAFETY: The type invariants guarantee that `LocalFile` is always ref-counted. This implementation
@@ -307,6 +351,134 @@ impl<P> LocalFile<P> {
         // SAFETY: `LocalFile` and `File` have the same layout.
         unsafe { ARef::from_raw(ARef::into_raw(me).cast()) }
     }
+}
+
+/// Non-owning file pointer with uniqueness (e.g. can't clone out of it, don't make one unless
+/// you've got limit 1 and are giving up your own)
+#[repr(transparent)]
+pub struct InitFile<'a, P> {
+    inner: &'a mut Opaque<bindings::file>,
+    phantom: core::marker::PhantomData<P>,
+}
+
+impl<'a, P> InitFile<'a, P> {
+    /// Solemnly swear you are the only owner of this file, and create an initializer with the
+    /// current existing type.
+    /// # Safety
+    /// * You must be the only owner of this file.
+    /// * You must meant the LocalFile from_raw_file reqs.
+    pub unsafe fn from_raw_file(ptr: *mut bindings::file) -> Self {
+        // Safety: TODO
+        InitFile {inner: unsafe { &mut *ptr.cast() }, phantom: core::marker::PhantomData}
+    }
+
+    /// We're done initing, convert to a full object
+    pub fn init(self) -> &'a File<P> {
+        // Safety:
+        // Since we take `self` by ownership, all outstanding borrows/edits have already happened.
+        // Since we were the sole owner of the file, and we don't degrade to a `LocalFile`, no
+        // unlocked `fdget_pos` should have been allowed.
+        unsafe { File::from_raw_file(self.inner as *mut _ as *const _) }
+    }
+
+    /// Convenience access to private data field
+    #[inline]
+    unsafe fn set_raw_private_data(&mut self, private_data: *mut c_void) {
+        // Safety TODO
+        unsafe { (*self.as_ptr()).private_data = private_data }
+    }
+}
+
+impl <'a, P: ForeignOwnable> InitFile<'a, P> {
+    /// Replace an owned or () private_data with a new owned value
+    pub fn set_private<Q: ForeignOwnable>(mut self, val: Q) -> InitFile<'a, Q> {
+        drop(unsafe { self.take_private_data() });
+        unsafe { self.set_raw_private_data(val.into_foreign()) };
+        unsafe { core::mem::transmute(self) }
+    }
+    /// Replace an owned or () private_data with a reference that outlives the
+    /// file.
+    pub fn set_private_outlives<Q: OutlivesRef>(mut self, val: &'static Q::Target) -> InitFile<'a, Q> {
+        drop(unsafe { self.take_private_data() });
+        unsafe { self.set_raw_private_data(val as *const _ as *const c_void as *mut c_void) };
+        unsafe { core::mem::transmute(self) }
+    }
+}
+
+impl <'a, P: OutlivesRef> InitFile<'a, P> {
+    /// Replace an outliving reference with owned private data
+    pub fn overwrite_private<Q: ForeignOwnable>(mut self, val: Q) -> InitFile<'a, Q> {
+        unsafe { self.set_raw_private_data(val.into_foreign()) };
+        unsafe { core::mem::transmute(self) }
+    }
+    /// Replace an outliving reference with a new one
+    pub fn overwrite_private_outlives<Q: OutlivesRef>(mut self, val: &'static Q::Target) -> InitFile<'a, Q> {
+        unsafe { self.set_raw_private_data(val as *const _ as *const c_void as *mut c_void) };
+        unsafe { core::mem::transmute(self) }
+    }
+}
+
+/// RawFile is a wrapped `struct file *` with no access to refcounts or Sync/Send properties
+/// You probably don't want to use this.
+// TODO consider moving these functions into a trait that all File types implement through a
+// blanket deref impl?
+#[repr(transparent)]
+pub struct RawFile<P> {
+    inner: Opaque<bindings::file>,
+    phantom: core::marker::PhantomData<P>,
+}
+
+// Make RawFile methods available to File and LocalFile
+impl<P> core::ops::Deref for LocalFile<P> {
+    type Target = RawFile<P>;
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        // SAFETY: The caller provides a `&File`, and since it is a reference, it must point at a
+        // valid file for the desired duration.
+        //
+        // By the type invariants, there are no `fdget_pos` calls that did not take the
+        // `f_pos_lock` mutex.
+        //
+        // By the type invariants, we already have an appropriate `P`.
+        unsafe { RawFile::from_raw_file(self as *const Self as *const bindings::file) }
+    }
+}
+
+// Make RawFile methods available to InitFile
+impl<'a, P> core::ops::Deref for InitFile<'a, P> {
+    type Target = RawFile<P>;
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        // SAFETY: The caller provides a `&File`, and since it is a reference, it must point at a
+        // valid file for the desired duration.
+        //
+        // By the type invariants, there are no `fdget_pos` calls that did not take the
+        // `f_pos_lock` mutex.
+        //
+        // By the type invariants, we already have an appropriate `P`.
+        unsafe { RawFile::from_raw_file(self as *const Self as *const bindings::file) }
+    }
+}
+
+impl<P> RawFile<P> {
+    /// Creates a reference to a [`RawFile`] from a valid pointer.
+    ///
+    /// # Safety
+    ///
+    /// * The caller must ensure that `ptr` points at a valid file and that the file's refcount is
+    ///   positive for the duration of 'a.
+    /// * The caller must ensure that if there is an active call to `fdget_pos` that did not take
+    ///   the `f_pos_lock` mutex, then that call is on the current thread.
+    #[inline]
+    pub unsafe fn from_raw_file<'a>(ptr: *const bindings::file) -> &'a Self {
+        // SAFETY: The caller guarantees that the pointer is not dangling and stays valid for the
+        // duration of 'a. The cast is okay because `File` is `repr(transparent)`.
+        //
+        // INVARIANT: The caller guarantees that there are no problematic `fdget_pos` calls.
+        // INVARIANT: The caller guarantees that `P` matches `private_data`'s pointee or is `()`
+        unsafe { &*ptr.cast() }
+    }
+
 
     /// Returns a raw pointer to the inner C struct.
     #[inline]
@@ -338,7 +510,36 @@ impl<P> LocalFile<P> {
         // FIXME(read_once): Replace with `read_once` when available on the Rust side.
         unsafe { core::ptr::addr_of!((*self.as_ptr()).f_flags).read_volatile() }
     }
+
+    /// Convenience access to private data field
+    #[inline]
+    fn raw_private_data(&self) -> *mut c_void {
+        // Safety TODO
+        unsafe { (*self.as_ptr()).private_data }
+    }
 }
+
+impl<P: ForeignOwnable> RawFile<P> {
+    /// Borrow private data
+    #[inline]
+    pub fn private_data<'a>(&'a self) -> P::Borrowed<'a> {
+        unsafe { P::borrow(self.raw_private_data()) }
+    }
+    /// Take private data
+    #[inline]
+    pub unsafe fn take_private_data<'a>(&'a self) -> P {
+        unsafe { P::from_foreign( self.raw_private_data()) }
+    }
+}
+
+impl<P: OutlivesRef> RawFile<P> {
+    #[inline]
+    /// Borrow the private data
+    pub fn private_data_outlives(&self) -> &P::Target {
+        unsafe { (*self.as_ptr()).private_data.cast::<P::Target>().as_ref().unwrap_unchecked() }
+    }
+}
+
 
 impl<P> File<P> {
     /// Creates a reference to a [`File`] from a valid pointer.
@@ -362,7 +563,7 @@ impl<P> File<P> {
     }
 }
 
-// Make LocalFile methods available on File.
+// Allow methods which only require a `&LocalFile` to accept a `&File`.
 impl<P> core::ops::Deref for File<P> {
     type Target = LocalFile<P>;
     #[inline]

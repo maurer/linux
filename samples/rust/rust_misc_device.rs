@@ -100,13 +100,13 @@ use kernel::{
     c_str,
     device::Device,
     fs::File,
-    fs::file::{Outlives, RawFile},
+    fs::file::RawFile,
     ioctl::{_IO, _IOC_SIZE, _IOR, _IOW},
     miscdevice::{MiscDevice, MiscDeviceOptions, MiscDeviceRegistration},
     new_mutex,
     prelude::*,
     sync::Mutex,
-    types::ARef,
+    types::{ARef, Outlives},
     uaccess::{UserSlice, UserSliceReader, UserSliceWriter},
 };
 
@@ -158,7 +158,7 @@ impl MiscDevice for RustMiscDevice {
     type Ptr = Pin<KBox<Self>>;
 
     fn open(file: &RawFile<Outlives<MiscDeviceRegistration<Self>>>) -> Result<Self::Ptr> {
-        let dev = ARef::from(file.private_data_outlives().device());
+        let dev = ARef::from(file.private_data().device());
 
         dev_info!(dev, "Opening Rust Misc Device Sample\n");
 

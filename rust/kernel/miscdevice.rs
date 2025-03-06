@@ -8,7 +8,6 @@
 //!
 //! Reference: <https://www.kernel.org/doc/html/latest/driver-api/misc_devices.html>
 
-use crate::fs::file::Outlives;
 use crate::{
     bindings,
     device::Device,
@@ -19,7 +18,7 @@ use crate::{
     prelude::*,
     seq_file::SeqFile,
     str::CStr,
-    types::{ForeignOwnable, Opaque},
+    types::{ForeignOwnable, Opaque, Outlives},
 };
 use core::{marker::PhantomData, mem::MaybeUninit, pin::Pin};
 
@@ -107,7 +106,7 @@ impl<T> PinnedDrop for MiscDeviceRegistration<T> {
 
 /// Trait implemented by the private data of an open misc device.
 #[vtable]
-pub trait MiscDevice: Sized {
+pub trait MiscDevice: Sized + 'static {
     /// What kind of pointer should `Self` be wrapped in.
     type Ptr: ForeignOwnable + Send + Sync;
 
@@ -219,7 +218,7 @@ unsafe extern "C" fn fops_open<T: MiscDevice>(
     let file = unsafe { InitFile::from_raw_file(raw_file) };
 
     match T::open(&file) {
-        Ok(ptr) => file.overwrite_private(ptr),
+        Ok(ptr) => file.set_private(ptr),
         Err(err) => return err.to_errno(),
     };
     0

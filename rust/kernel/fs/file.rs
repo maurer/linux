@@ -10,8 +10,6 @@
 //! A C `struct file *` can indicate many things. The ones we currently model are:
 //! * `File<()>` - A file with unknown or don't-care private data
 //! * `P: ForeignOwned`, `File<P>` - A file with known private data which owns its private data.
-//! * `File<Outlives<T>>` - A file with known private data, where the private data is known to
-//!   outlive the file.
 //! * `LocalFile<P>` - A degraded version of `File` which is not `Sync` or `Send`. This gives no
 //!   additional powers relative to `File`, but helps to correctly respect `fdget_pos`
 //!   optimizations.
@@ -206,23 +204,6 @@ pub struct File<P> {
     phantom: core::marker::PhantomData<P>,
 }
 
-/// Wrap the target type in this if it's a pointer to a data structure which is guaranteed to
-/// outlive the file itself, e.g. driver static data
-pub struct Outlives<T>(core::marker::PhantomData<*const T>);
-
-mod sealed {
-    pub trait Sealed {}
-}
-/// Trait for types representing a reference which outlives the dynamic scope of the file
-pub trait OutlivesRef: sealed::Sealed {
-    /// Target this derefs to
-    type Target;
-}
-impl<T> sealed::Sealed for Outlives<T> {}
-impl<T> OutlivesRef for Outlives<T> {
-    type Target = T;
-}
-
 // SAFETY: This file is known to not have any active `fdget_pos` calls that did not take the
 // `f_pos_lock` mutex, so it is safe to transfer it between threads.
 unsafe impl<P: Send> Send for File<P> {}
@@ -398,26 +379,6 @@ impl <'a, P: ForeignOwnable> InitFile<'a, P> {
         unsafe { self.set_raw_private_data(val.into_foreign()) };
         unsafe { core::mem::transmute(self) }
     }
-    /// Replace an owned or () private_data with a reference that outlives the
-    /// file.
-    pub fn set_private_outlives<Q: OutlivesRef>(mut self, val: &'static Q::Target) -> InitFile<'a, Q> {
-        drop(unsafe { self.take_private_data() });
-        unsafe { self.set_raw_private_data(val as *const _ as *const c_void as *mut c_void) };
-        unsafe { core::mem::transmute(self) }
-    }
-}
-
-impl <'a, P: OutlivesRef> InitFile<'a, P> {
-    /// Replace an outliving reference with owned private data
-    pub fn overwrite_private<Q: ForeignOwnable>(mut self, val: Q) -> InitFile<'a, Q> {
-        unsafe { self.set_raw_private_data(val.into_foreign()) };
-        unsafe { core::mem::transmute(self) }
-    }
-    /// Replace an outliving reference with a new one
-    pub fn overwrite_private_outlives<Q: OutlivesRef>(mut self, val: &'static Q::Target) -> InitFile<'a, Q> {
-        unsafe { self.set_raw_private_data(val as *const _ as *const c_void as *mut c_void) };
-        unsafe { core::mem::transmute(self) }
-    }
 }
 
 /// RawFile is a wrapped `struct file *` with no access to refcounts or Sync/Send properties
@@ -533,15 +494,6 @@ impl<P: ForeignOwnable> RawFile<P> {
         unsafe { P::from_foreign( self.raw_private_data()) }
     }
 }
-
-impl<P: OutlivesRef> RawFile<P> {
-    #[inline]
-    /// Borrow the private data
-    pub fn private_data_outlives(&self) -> &P::Target {
-        unsafe { (*self.as_ptr()).private_data.cast::<P::Target>().as_ref().unwrap_unchecked() }
-    }
-}
-
 
 impl<P> File<P> {
     /// Creates a reference to a [`File`] from a valid pointer.

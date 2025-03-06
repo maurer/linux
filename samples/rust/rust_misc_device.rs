@@ -100,6 +100,7 @@ use kernel::{
     c_str,
     device::Device,
     fs::File,
+    fs::file::{Outlives, RawFile},
     ioctl::{_IO, _IOC_SIZE, _IOR, _IOW},
     miscdevice::{MiscDevice, MiscDeviceOptions, MiscDeviceRegistration},
     new_mutex,
@@ -156,8 +157,8 @@ struct RustMiscDevice {
 impl MiscDevice for RustMiscDevice {
     type Ptr = Pin<KBox<Self>>;
 
-    fn open(_file: &File, misc: &MiscDeviceRegistration<Self>) -> Result<Pin<KBox<Self>>> {
-        let dev = ARef::from(misc.device());
+    fn open(file: &RawFile<Outlives<MiscDeviceRegistration<Self>>>) -> Result<Self::Ptr> {
+        let dev = ARef::from(file.private_data_outlives().device());
 
         dev_info!(dev, "Opening Rust Misc Device Sample\n");
 
@@ -172,7 +173,8 @@ impl MiscDevice for RustMiscDevice {
         )
     }
 
-    fn ioctl(me: Pin<&RustMiscDevice>, _file: &File, cmd: u32, arg: usize) -> Result<isize> {
+    fn ioctl(file: &File<Self::Ptr>, cmd: u32, arg: usize) -> Result<isize> {
+        let me = file.private_data();
         dev_info!(me.dev, "IOCTLing Rust Misc Device Sample\n");
 
         let size = _IOC_SIZE(cmd);

@@ -8,12 +8,14 @@
 //!
 //! Reference: <https://www.kernel.org/doc/html/latest/driver-api/misc_devices.html>
 
+use crate::fs::file::Outlives;
 use crate::{
     bindings,
     device::Device,
     error::{to_result, Error, Result, VTABLE_DEFAULT_ERROR},
     ffi::{c_int, c_long, c_uint, c_ulong},
-    fs::File,
+    fs::{File, InitFile},
+    fs::file::RawFile,
     prelude::*,
     seq_file::SeqFile,
     str::CStr,
@@ -112,11 +114,13 @@ pub trait MiscDevice: Sized {
     /// Called when the misc device is opened.
     ///
     /// The returned pointer will be stored as the private data for the file.
-    fn open(_file: &File<MiscDeviceRegistration<Self>>, _misc: &MiscDeviceRegistration<Self>) -> Result<Self::Ptr>;
+    fn open(file: &RawFile<Outlives<MiscDeviceRegistration<Self>>>) -> Result<Self::Ptr>;
 
     /// Called when the misc device is released.
-    fn release(device: Self::Ptr, _file: &File<MiscDeviceRegistration<Self>>) {
-        drop(device);
+    fn release(file: &File<Self::Ptr>) {
+        unsafe {
+            drop(file.take_private_data());
+        }
     }
 
     /// Handler for ioctls.
@@ -125,8 +129,7 @@ pub trait MiscDevice: Sized {
     ///
     /// [`kernel::ioctl`]: mod@crate::ioctl
     fn ioctl(
-        _device: <Self::Ptr as ForeignOwnable>::Borrowed<'_>,
-        _file: &File<MiscDeviceRegistration<Self>>,
+        _file: &File<Self::Ptr>,
         _cmd: u32,
         _arg: usize,
     ) -> Result<isize> {
@@ -142,8 +145,7 @@ pub trait MiscDevice: Sized {
     /// provided, then `compat_ptr_ioctl` will be used instead.
     #[cfg(CONFIG_COMPAT)]
     fn compat_ioctl(
-        _device: <Self::Ptr as ForeignOwnable>::Borrowed<'_>,
-        _file: &File<MiscDeviceRegistration<Self>>,
+        _file: &File<Self::Ptr>,
         _cmd: u32,
         _arg: usize,
     ) -> Result<isize> {
@@ -208,31 +210,18 @@ unsafe extern "C" fn fops_open<T: MiscDevice>(
         return ret;
     }
 
-    // SAFETY: The open call of a file can access the private data.
-    let misc_ptr = unsafe { (*raw_file).private_data };
-
-    // SAFETY: This is a miscdevice, so `misc_open()` set the private data to a pointer to the
-    // associated `struct miscdevice` before calling into this method. Furthermore, `misc_open()`
-    // ensures that the miscdevice can't be unregistered and freed during this call to `fops_open`.
-    let misc = unsafe { &*misc_ptr.cast::<MiscDeviceRegistration<T>>() };
-
     // SAFETY:
     // * This underlying file is valid for (much longer than) the duration of `T::open`.
     // * There is no active fdget_pos region on the file on this thread.
-    let file = unsafe { File::from_raw_file(raw_file) };
+    // * The file is guaranteed to be a pointer to our MiscDeviceRegistration, so
+    //   `Outlives<MiscDeviceRegistration<T>>` is accurate.
+    //   TODO extend
+    let file = unsafe { InitFile::from_raw_file(raw_file) };
 
-    let ptr = match T::open(file, misc) {
-        Ok(ptr) => ptr,
+    match T::open(&file) {
+        Ok(ptr) => file.overwrite_private(ptr),
         Err(err) => return err.to_errno(),
     };
-
-    // This overwrites the private data with the value specified by the user, changing the type of
-    // this file's private data. All future accesses to the private data is performed by other
-    // fops_* methods in this file, which all correctly cast the private data to the new type.
-    //
-    // SAFETY: The open call of a file can access the private data.
-    unsafe { (*raw_file).private_data = ptr.into_foreign() };
-
     0
 }
 
@@ -244,15 +233,10 @@ unsafe extern "C" fn fops_release<T: MiscDevice>(
     _inode: *mut bindings::inode,
     file: *mut bindings::file,
 ) -> c_int {
-    // SAFETY: The release call of a file owns the private data.
-    let private = unsafe { (*file).private_data };
-    // SAFETY: The release call of a file owns the private data.
-    let ptr = unsafe { <T::Ptr as ForeignOwnable>::from_foreign(private) };
-
     // SAFETY:
     // * The file is valid for the duration of this call.
     // * There is no active fdget_pos region on the file on this thread.
-    T::release(ptr, unsafe { File::from_raw_file(file) });
+    T::release(unsafe { File::from_raw_file(file) });
 
     0
 }
@@ -265,17 +249,13 @@ unsafe extern "C" fn fops_ioctl<T: MiscDevice>(
     cmd: c_uint,
     arg: c_ulong,
 ) -> c_long {
-    // SAFETY: The ioctl call of a file can access the private data.
-    let private = unsafe { (*file).private_data };
-    // SAFETY: Ioctl calls can borrow the private data of the file.
-    let device = unsafe { <T::Ptr as ForeignOwnable>::borrow(private) };
-
     // SAFETY:
     // * The file is valid for the duration of this call.
     // * There is no active fdget_pos region on the file on this thread.
+    // TODO amend for type
     let file = unsafe { File::from_raw_file(file) };
 
-    match T::ioctl(device, file, cmd, arg) {
+    match T::ioctl(file, cmd, arg) {
         Ok(ret) => ret as c_long,
         Err(err) => err.to_errno() as c_long,
     }
@@ -290,17 +270,13 @@ unsafe extern "C" fn fops_compat_ioctl<T: MiscDevice>(
     cmd: c_uint,
     arg: c_ulong,
 ) -> c_long {
-    // SAFETY: The compat ioctl call of a file can access the private data.
-    let private = unsafe { (*file).private_data };
-    // SAFETY: Ioctl calls can borrow the private data of the file.
-    let device = unsafe { <T::Ptr as ForeignOwnable>::borrow(private) };
-
     // SAFETY:
     // * The file is valid for the duration of this call.
     // * There is no active fdget_pos region on the file on this thread.
+    // * TODO amend for type
     let file = unsafe { File::from_raw_file(file) };
 
-    match T::compat_ioctl(device, file, cmd, arg) {
+    match T::compat_ioctl(file, cmd, arg) {
         Ok(ret) => ret as c_long,
         Err(err) => err.to_errno() as c_long,
     }

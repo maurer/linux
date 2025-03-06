@@ -5,4 +5,4 @@
 //! C headers: [`include/linux/fs.h`](srctree/include/linux/fs.h)
 
 pub mod file;
-pub use self::file::{File, LocalFile};
+pub use self::file::{File, InitFile, LocalFile};

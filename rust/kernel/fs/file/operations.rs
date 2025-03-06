@@ -1,5 +1,7 @@
 //! Traits and helpers for filling out `file_operations` from Rust
 
+use crate::ffi::{c_int, c_long, c_uint, c_ulong};
+use core::mem::MaybeUninit;
 // TODO refine
 use super::*;
 
@@ -23,9 +25,9 @@ pub struct Whence(pub ffi::c_int);
 // Sized restriction is because this should always either be a ZST (the ref type) or a owning type
 // TODO add defaults with vtable error
 #[vtable]
-pub trait Operations: Sized {
+pub trait Operations: Sized + ForeignOwnable + Sync + Send {
     /// Type that comes into open when constructing
-    type Init;
+    type Init: ForeignOwnable;
 
     /// Seek impl
     fn llseek(_file: &File<Self>, _offset: loff_t, _whence: Whence) -> Result<loff_t> {
@@ -84,4 +86,132 @@ pub trait Operations: Sized {
     fn show_fdinfo(_seq_file: &SeqFile, _file: &File<Self>) {
         build_error!(VTABLE_DEFAULT_ERROR)
     }
+    /// vtable suitable for use in a file_operations slot
+    const VTABLE: bindings::file_operations = bindings::file_operations {
+        open: Some(fops_open::<Self>),
+        release: Some(fops_release::<Self>),
+        unlocked_ioctl: then_some(Self::HAS_IOCTL, fops_ioctl::<Self>),
+        #[cfg(CONFIG_COMPAT)]
+        compat_ioctl: if Self::HAS_COMPAT_IOCTL {
+            Some(fops_compat_ioctl::<Self>)
+        } else if Self::HAS_IOCTL {
+            Some(bindings::compat_ptr_ioctl)
+        } else {
+            None
+        },
+        show_fdinfo: then_some(Self::HAS_SHOW_FDINFO, fops_show_fdinfo::<Self>),
+        // SAFETY: All zeros is a valid value for `bindings::file_operations`.
+        ..unsafe { MaybeUninit::zeroed().assume_init() }
+    };
+}
+
+const fn then_some<T: Copy>(b: bool, t: T) -> Option<T> {
+    if b {
+        Some(t)
+    } else {
+        None
+    }
+}
+
+/// # Safety
+///
+/// `file` and `inode` must be the file and inode for a file that is undergoing initialization.
+/// The file must be associated with a `<T as Operations>::Init`.
+unsafe extern "C" fn fops_open<T: Operations>(
+    inode: *mut bindings::inode,
+    raw_file: *mut bindings::file,
+) -> c_int {
+    // SAFETY: The pointers are valid and for a file being opened.
+    let ret = unsafe { bindings::generic_file_open(inode, raw_file) };
+    if ret != 0 {
+        return ret;
+    }
+
+    // SAFETY:
+    // * This underlying file is valid for (much longer than) the duration of `T::open`.
+    // * There is no active fdget_pos region on the file on this thread.
+    // * The file is guaranteed to use `<T as Operations>::Init` by precondition.
+    let file = unsafe { InitFile::from_raw_file(raw_file) };
+
+    match T::open(&file) {
+        Ok(ptr) => file.set_private(ptr),
+        Err(err) => return err.to_errno(),
+    };
+    0
+}
+
+/// # Safety
+///
+/// `file` and `inode` must be the file and inode for a file that is being released. The file must
+/// be associated with a `T`.
+unsafe extern "C" fn fops_release<T: Operations>(
+    _inode: *mut bindings::inode,
+    file: *mut bindings::file,
+) -> c_int {
+    // SAFETY:
+    // * The file is valid for the duration of this call.
+    // * There is no active fdget_pos region on the file on this thread.
+    T::release(unsafe { File::from_raw_file(file) });
+
+    0
+}
+
+/// # Safety
+///
+/// `file` must be a valid file that is associated with a `MiscDeviceRegistration<T>`.
+unsafe extern "C" fn fops_ioctl<T: Operations>(
+    file: *mut bindings::file,
+    cmd: c_uint,
+    arg: c_ulong,
+) -> c_long {
+    // SAFETY:
+    // * The file is valid for the duration of this call.
+    // * There is no active fdget_pos region on the file on this thread.
+    // TODO amend for type
+    let file = unsafe { File::from_raw_file(file) };
+
+    match T::ioctl(file, cmd, arg) {
+        Ok(ret) => ret as c_long,
+        Err(err) => err.to_errno() as c_long,
+    }
+}
+
+/// # Safety
+///
+/// `file` must be a valid file that is associated with a `MiscDeviceRegistration<T>`.
+#[cfg(CONFIG_COMPAT)]
+unsafe extern "C" fn fops_compat_ioctl<T: Operations>(
+    file: *mut bindings::file,
+    cmd: c_uint,
+    arg: c_ulong,
+) -> c_long {
+    // SAFETY:
+    // * The file is valid for the duration of this call.
+    // * There is no active fdget_pos region on the file on this thread.
+    // * TODO amend for type
+    let file = unsafe { File::from_raw_file(file) };
+
+    match T::compat_ioctl(file, cmd, arg) {
+        Ok(ret) => ret as c_long,
+        Err(err) => err.to_errno() as c_long,
+    }
+}
+
+/// # Safety
+///
+/// - `file` must be a valid file that is associated with a `MiscDeviceRegistration<T>`.
+/// - `seq_file` must be a valid `struct seq_file` that we can write to.
+unsafe extern "C" fn fops_show_fdinfo<T: Operations>(
+    seq_file: *mut bindings::seq_file,
+    file: *mut bindings::file,
+) {
+    // SAFETY:
+    // * The file is valid for the duration of this call.
+    // * There is no active fdget_pos region on the file on this thread.
+    let file = unsafe { File::from_raw_file(file) };
+    // SAFETY: The caller ensures that the pointer is valid and exclusive for the duration in which
+    // this method is called.
+    let m = unsafe { SeqFile::from_raw(seq_file) };
+
+    T::show_fdinfo(m, file);
 }

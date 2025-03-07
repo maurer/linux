@@ -126,7 +126,9 @@ def generate_crates(srctree, objtree, sysroot_src, external_src, cfgs):
 
             # Skip those that are not crate roots.
             if not is_root_crate(path.parent / "Makefile", name) and \
-               not is_root_crate(path.parent / "Kbuild", name):
+               not is_root_crate(path.parent.parent / "Makefile", name) and \
+               not is_root_crate(path.parent / "Kbuild", name) and \
+               not is_root_crate(path.parent.parent / "Kbuild", name):
                 continue
 
             logging.info("Adding %s", name)

@@ -8,6 +8,18 @@ use core::ops::{self, Deref, DerefMut, Index};
 
 use crate::error::{code::*, Error};
 
+#[inline]
+fn find_zero(buf: &[u8]) -> Option<usize> {
+    // SAFETY: The slice lives across the call, and is valid for its own length.
+    let base = buf.as_ptr().cast();
+    let ptr = unsafe { bindings::memchr(base, 0, buf.len()) };
+    if ptr.is_null() {
+        None
+    } else {
+        Some(ptr as usize - base as usize)
+    }
+}
+
 /// Byte string without UTF-8 validity guarantee.
 #[repr(transparent)]
 pub struct BStr([u8]);
@@ -219,6 +231,19 @@ impl CStr {
         }
         // SAFETY: We just checked that all properties hold.
         Ok(unsafe { Self::from_bytes_with_nul_unchecked(bytes) })
+    }
+
+    /// Creates a [`CStr`] from a `[u8]`, without knowing where the terminator is.
+    ///
+    /// The provided slice must contain at least one `NUL`. The resulting `CStr` will
+    /// terminate at the first one.
+    pub fn from_bytes_until_nul(bytes: &[u8]) -> Result<&Self, CStrConvertError> {
+        let Some(nul_offset) = find_zero(bytes) else {
+            return Err(CStrConvertError::NotNulTerminated)
+        };
+        // SAFETY: We just found the first NUL in the array, so truncating there will
+        // result in a slice that is both NUL-terminated and has no interior NULs.
+        Ok(unsafe { Self::from_bytes_with_nul_unchecked(&bytes[..nul_offset + 1]) })
     }
 
     /// Creates a [`CStr`] from a `[u8]` without performing any additional
@@ -818,6 +843,7 @@ impl fmt::Write for Formatter {
 /// assert_eq!(s.is_ok(), false);
 /// # Ok::<(), kernel::error::Error>(())
 /// ```
+#[derive(Default)]
 pub struct CString {
     buf: KVec<u8>,
 }
@@ -842,13 +868,8 @@ impl CString {
         // `buf`'s capacity. The contents of the buffer have been initialised by writes to `f`.
         unsafe { buf.set_len(f.bytes_written()) };
 
-        // Check that there are no `NUL` bytes before the end.
-        // SAFETY: The buffer is valid for read because `f.bytes_written()` is bounded by `size`
-        // (which the minimum buffer size) and is non-zero (we wrote at least the `NUL` terminator)
-        // so `f.bytes_written() - 1` doesn't underflow.
-        let ptr = unsafe { bindings::memchr(buf.as_ptr().cast(), 0, f.bytes_written() - 1) };
-        if !ptr.is_null() {
-            return Err(EINVAL);
+        if find_zero(&buf[..f.bytes_written() - 1]).is_some() {
+            return Err(EINVAL)
         }
 
         // INVARIANT: We wrote the `NUL` terminator and checked above that no other `NUL` bytes
@@ -886,6 +907,12 @@ impl<'a> TryFrom<&'a CStr> for CString {
         // INVARIANT: The `CStr` and `CString` types have the same invariants for
         // the string data, and we copied it over without changes.
         Ok(CString { buf })
+    }
+}
+
+impl fmt::Display for CString {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&**self, f)
     }
 }
 

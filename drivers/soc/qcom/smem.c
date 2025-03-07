@@ -1236,6 +1236,17 @@ static int qcom_smem_probe(struct platform_device *pdev)
 	if (IS_ERR(smem->socinfo))
 		dev_dbg(&pdev->dev, "failed to register socinfo device\n");
 
+	// TODO this leaks the previous registration
+	// In the version sent to the list, we will be replacing the qcom-socinfo
+	// driver, and therefore don't need to worry about this - we'll edit the above
+	// stanza.
+	smem->socinfo = platform_device_register_data(&pdev->dev, "qcom_socinfo_driver_rust",
+						      PLATFORM_DEVID_NONE, NULL,
+						      0);
+	if (IS_ERR(smem->socinfo))
+		dev_dbg(&pdev->dev, "failed to register rust socinfo device\n");
+
+
 	return 0;
 }
 

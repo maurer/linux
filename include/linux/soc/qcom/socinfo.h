@@ -14,6 +14,12 @@
 #define SMEM_SOCINFO_BUILD_ID_LENGTH	32
 #define SMEM_SOCINFO_CHIP_ID_LENGTH	32
 
+#define SMEM_IMAGE_VERSION_TABLE	469
+
+#define SMEM_IMAGE_VERSION_NAME_SIZE	75
+#define SMEM_IMAGE_VERSION_VARIANT_SIZE	20
+#define SMEM_IMAGE_VERSION_OEM_SIZE	32
+
 /*
  * SoC version type with major number in the upper 16 bits and minor
  * number in the lower 16 bits.
@@ -107,5 +113,19 @@ enum qcom_socinfo_feature_code {
 #define SOCINFO_PC_UNKNOWN		0
 #define SOCINFO_PCn(n)			((n) + 1)
 #define SOCINFO_PC_RESERVE		(BIT(31) - 1)
+
+/* PMIC Array Entries */
+struct qcom_pmic_entry {
+	__le32 model;
+	__le32 die_rev;
+} __packed;
+
+/* Image Version Array Entry */
+struct qcom_smem_image_version {
+	char name[SMEM_IMAGE_VERSION_NAME_SIZE];
+	char variant[SMEM_IMAGE_VERSION_VARIANT_SIZE];
+	char pad;
+	char oem[SMEM_IMAGE_VERSION_OEM_SIZE];
+};
 
 #endif

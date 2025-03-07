@@ -8,17 +8,15 @@
 //!
 //! Reference: <https://www.kernel.org/doc/html/latest/driver-api/misc_devices.html>
 
+use crate::types::Outlives;
 use crate::{
     bindings,
     device::Device,
-    error::{to_result, Error, Result, VTABLE_DEFAULT_ERROR},
-    ffi::{c_int, c_long, c_uint, c_ulong},
-    fs::{File, InitFile},
-    fs::file::RawFile,
+    error::{to_result, Error},
+    fs::file::operations::Operations,
     prelude::*,
-    seq_file::SeqFile,
     str::CStr,
-    types::{ForeignOwnable, Opaque, Outlives},
+    types::Opaque,
 };
 use core::{marker::PhantomData, mem::MaybeUninit, pin::Pin};
 
@@ -31,12 +29,14 @@ pub struct MiscDeviceOptions {
 
 impl MiscDeviceOptions {
     /// Create a raw `struct miscdev` ready for registration.
-    pub const fn into_raw<T: MiscDevice>(self) -> bindings::miscdevice {
+    pub const fn into_raw<T: Operations<Init = Outlives<MiscDeviceRegistration<T>>> + 'static>(
+        self,
+    ) -> bindings::miscdevice {
         // SAFETY: All zeros is valid for this C type.
         let mut result: bindings::miscdevice = unsafe { MaybeUninit::zeroed().assume_init() };
         result.minor = bindings::MISC_DYNAMIC_MINOR as _;
         result.name = self.name.as_char_ptr();
-        result.fops = create_vtable::<T>();
+        result.fops = &<T as Operations>::VTABLE;
         result
     }
 }
@@ -61,7 +61,7 @@ unsafe impl<T> Send for MiscDeviceRegistration<T> {}
 // parallel.
 unsafe impl<T> Sync for MiscDeviceRegistration<T> {}
 
-impl<T: MiscDevice> MiscDeviceRegistration<T> {
+impl<T: Operations<Init = Outlives<Self>> + 'static> MiscDeviceRegistration<T> {
     /// Register a misc device.
     pub fn register(opts: MiscDeviceOptions) -> impl PinInit<Self, Error> {
         try_pin_init!(Self {
@@ -102,204 +102,4 @@ impl<T> PinnedDrop for MiscDeviceRegistration<T> {
         // SAFETY: We know that the device is registered by the type invariants.
         unsafe { bindings::misc_deregister(self.inner.get()) };
     }
-}
-
-/// Trait implemented by the private data of an open misc device.
-#[vtable]
-pub trait MiscDevice: Sized + 'static {
-    /// What kind of pointer should `Self` be wrapped in.
-    type Ptr: ForeignOwnable + Send + Sync;
-
-    /// Called when the misc device is opened.
-    ///
-    /// The returned pointer will be stored as the private data for the file.
-    fn open(file: &RawFile<Outlives<MiscDeviceRegistration<Self>>>) -> Result<Self::Ptr>;
-
-    /// Called when the misc device is released.
-    fn release(file: &File<Self::Ptr>) {
-        unsafe {
-            drop(file.take_private_data());
-        }
-    }
-
-    /// Handler for ioctls.
-    ///
-    /// The `cmd` argument is usually manipulated using the utilties in [`kernel::ioctl`].
-    ///
-    /// [`kernel::ioctl`]: mod@crate::ioctl
-    fn ioctl(
-        _file: &File<Self::Ptr>,
-        _cmd: u32,
-        _arg: usize,
-    ) -> Result<isize> {
-        build_error!(VTABLE_DEFAULT_ERROR)
-    }
-
-    /// Handler for ioctls.
-    ///
-    /// Used for 32-bit userspace on 64-bit platforms.
-    ///
-    /// This method is optional and only needs to be provided if the ioctl relies on structures
-    /// that have different layout on 32-bit and 64-bit userspace. If no implementation is
-    /// provided, then `compat_ptr_ioctl` will be used instead.
-    #[cfg(CONFIG_COMPAT)]
-    fn compat_ioctl(
-        _file: &File<Self::Ptr>,
-        _cmd: u32,
-        _arg: usize,
-    ) -> Result<isize> {
-        build_error!(VTABLE_DEFAULT_ERROR)
-    }
-
-    /// Show info for this fd.
-    fn show_fdinfo(
-        _device: <Self::Ptr as ForeignOwnable>::Borrowed<'_>,
-        _m: &SeqFile,
-        _file: &File<MiscDeviceRegistration<Self>>,
-    ) {
-        build_error!(VTABLE_DEFAULT_ERROR)
-    }
-}
-
-const fn create_vtable<T: MiscDevice>() -> &'static bindings::file_operations {
-    const fn maybe_fn<T: Copy>(check: bool, func: T) -> Option<T> {
-        if check {
-            Some(func)
-        } else {
-            None
-        }
-    }
-
-    struct VtableHelper<T: MiscDevice> {
-        _t: PhantomData<T>,
-    }
-    impl<T: MiscDevice> VtableHelper<T> {
-        const VTABLE: bindings::file_operations = bindings::file_operations {
-            open: Some(fops_open::<T>),
-            release: Some(fops_release::<T>),
-            unlocked_ioctl: maybe_fn(T::HAS_IOCTL, fops_ioctl::<T>),
-            #[cfg(CONFIG_COMPAT)]
-            compat_ioctl: if T::HAS_COMPAT_IOCTL {
-                Some(fops_compat_ioctl::<T>)
-            } else if T::HAS_IOCTL {
-                Some(bindings::compat_ptr_ioctl)
-            } else {
-                None
-            },
-            show_fdinfo: maybe_fn(T::HAS_SHOW_FDINFO, fops_show_fdinfo::<T>),
-            // SAFETY: All zeros is a valid value for `bindings::file_operations`.
-            ..unsafe { MaybeUninit::zeroed().assume_init() }
-        };
-    }
-
-    &VtableHelper::<T>::VTABLE
-}
-
-/// # Safety
-///
-/// `file` and `inode` must be the file and inode for a file that is undergoing initialization.
-/// The file must be associated with a `MiscDeviceRegistration<T>`.
-unsafe extern "C" fn fops_open<T: MiscDevice>(
-    inode: *mut bindings::inode,
-    raw_file: *mut bindings::file,
-) -> c_int {
-    // SAFETY: The pointers are valid and for a file being opened.
-    let ret = unsafe { bindings::generic_file_open(inode, raw_file) };
-    if ret != 0 {
-        return ret;
-    }
-
-    // SAFETY:
-    // * This underlying file is valid for (much longer than) the duration of `T::open`.
-    // * There is no active fdget_pos region on the file on this thread.
-    // * The file is guaranteed to be a pointer to our MiscDeviceRegistration, so
-    //   `Outlives<MiscDeviceRegistration<T>>` is accurate.
-    //   TODO extend
-    let file = unsafe { InitFile::from_raw_file(raw_file) };
-
-    match T::open(&file) {
-        Ok(ptr) => file.set_private(ptr),
-        Err(err) => return err.to_errno(),
-    };
-    0
-}
-
-/// # Safety
-///
-/// `file` and `inode` must be the file and inode for a file that is being released. The file must
-/// be associated with a `MiscDeviceRegistration<T>`.
-unsafe extern "C" fn fops_release<T: MiscDevice>(
-    _inode: *mut bindings::inode,
-    file: *mut bindings::file,
-) -> c_int {
-    // SAFETY:
-    // * The file is valid for the duration of this call.
-    // * There is no active fdget_pos region on the file on this thread.
-    T::release(unsafe { File::from_raw_file(file) });
-
-    0
-}
-
-/// # Safety
-///
-/// `file` must be a valid file that is associated with a `MiscDeviceRegistration<T>`.
-unsafe extern "C" fn fops_ioctl<T: MiscDevice>(
-    file: *mut bindings::file,
-    cmd: c_uint,
-    arg: c_ulong,
-) -> c_long {
-    // SAFETY:
-    // * The file is valid for the duration of this call.
-    // * There is no active fdget_pos region on the file on this thread.
-    // TODO amend for type
-    let file = unsafe { File::from_raw_file(file) };
-
-    match T::ioctl(file, cmd, arg) {
-        Ok(ret) => ret as c_long,
-        Err(err) => err.to_errno() as c_long,
-    }
-}
-
-/// # Safety
-///
-/// `file` must be a valid file that is associated with a `MiscDeviceRegistration<T>`.
-#[cfg(CONFIG_COMPAT)]
-unsafe extern "C" fn fops_compat_ioctl<T: MiscDevice>(
-    file: *mut bindings::file,
-    cmd: c_uint,
-    arg: c_ulong,
-) -> c_long {
-    // SAFETY:
-    // * The file is valid for the duration of this call.
-    // * There is no active fdget_pos region on the file on this thread.
-    // * TODO amend for type
-    let file = unsafe { File::from_raw_file(file) };
-
-    match T::compat_ioctl(file, cmd, arg) {
-        Ok(ret) => ret as c_long,
-        Err(err) => err.to_errno() as c_long,
-    }
-}
-
-/// # Safety
-///
-/// - `file` must be a valid file that is associated with a `MiscDeviceRegistration<T>`.
-/// - `seq_file` must be a valid `struct seq_file` that we can write to.
-unsafe extern "C" fn fops_show_fdinfo<T: MiscDevice>(
-    seq_file: *mut bindings::seq_file,
-    file: *mut bindings::file,
-) {
-    // SAFETY: The release call of a file owns the private data.
-    let private = unsafe { (*file).private_data };
-    // SAFETY: Ioctl calls can borrow the private data of the file.
-    let device = unsafe { <T::Ptr as ForeignOwnable>::borrow(private) };
-    // SAFETY:
-    // * The file is valid for the duration of this call.
-    // * There is no active fdget_pos region on the file on this thread.
-    let file = unsafe { File::from_raw_file(file) };
-    // SAFETY: The caller ensures that the pointer is valid and exclusive for the duration in which
-    // this method is called.
-    let m = unsafe { SeqFile::from_raw(seq_file) };
-
-    T::show_fdinfo(device, m, file);
 }

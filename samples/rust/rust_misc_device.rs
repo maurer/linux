@@ -99,10 +99,11 @@ use core::pin::Pin;
 use kernel::{
     c_str,
     device::Device,
-    fs::File,
+    fs::file::operations::Operations,
     fs::file::RawFile,
+    fs::File,
     ioctl::{_IO, _IOC_SIZE, _IOR, _IOW},
-    miscdevice::{MiscDevice, MiscDeviceOptions, MiscDeviceRegistration},
+    miscdevice::{MiscDeviceOptions, MiscDeviceRegistration},
     new_mutex,
     prelude::*,
     sync::Mutex,
@@ -154,10 +155,11 @@ struct RustMiscDevice {
 }
 
 #[vtable]
-impl MiscDevice for RustMiscDevice {
-    type Ptr = Pin<KBox<Self>>;
+impl Operations for RustMiscDevice {
+    type Init = Outlives<MiscDeviceRegistration<Self>>;
+    type State = Pin<KBox<RustMiscDevice>>;
 
-    fn open(file: &RawFile<Outlives<MiscDeviceRegistration<Self>>>) -> Result<Self::Ptr> {
+    fn open(file: &RawFile<Outlives<MiscDeviceRegistration<Self>>>) -> Result<Self::State> {
         let dev = ARef::from(file.private_data().device());
 
         dev_info!(dev, "Opening Rust Misc Device Sample\n");
@@ -173,7 +175,7 @@ impl MiscDevice for RustMiscDevice {
         )
     }
 
-    fn ioctl(file: &File<Self::Ptr>, cmd: u32, arg: usize) -> Result<isize> {
+    fn ioctl(file: &File<Self::State>, cmd: u32, arg: usize) -> Result<usize> {
         let me = file.private_data();
         dev_info!(me.dev, "IOCTLing Rust Misc Device Sample\n");
 
@@ -201,7 +203,7 @@ impl PinnedDrop for RustMiscDevice {
 }
 
 impl RustMiscDevice {
-    fn set_value(&self, mut reader: UserSliceReader) -> Result<isize> {
+    fn set_value(&self, mut reader: UserSliceReader) -> Result<()> {
         let new_value = reader.read::<i32>()?;
         let mut guard = self.inner.lock();
 
@@ -212,10 +214,10 @@ impl RustMiscDevice {
         );
 
         guard.value = new_value;
-        Ok(0)
+        Ok(())
     }
 
-    fn get_value(&self, mut writer: UserSliceWriter) -> Result<isize> {
+    fn get_value(&self, mut writer: UserSliceWriter) -> Result<()> {
         let guard = self.inner.lock();
         let value = guard.value;
 
@@ -228,13 +230,11 @@ impl RustMiscDevice {
             &value
         );
 
-        writer.write::<i32>(&value)?;
-        Ok(0)
+        writer.write::<i32>(&value)
     }
 
-    fn hello(&self) -> Result<isize> {
+    fn hello(&self) -> Result<()> {
         dev_info!(self.dev, "-> Hello from the Rust Misc Device\n");
-
-        Ok(0)
+        Ok(())
     }
 }

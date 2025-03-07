@@ -25,18 +25,20 @@ pub struct Whence(pub ffi::c_int);
 // Sized restriction is because this should always either be a ZST (the ref type) or a owning type
 // TODO add defaults with vtable error
 #[vtable]
-pub trait Operations: Sized + ForeignOwnable + Sync + Send {
+pub trait Operations: Sized + 'static {
     /// Type that comes into open when constructing
     type Init: ForeignOwnable;
+    /// Type of private_data after open
+    type State: ForeignOwnable + Sync + Send;
 
     /// Seek impl
-    fn llseek(_file: &File<Self>, _offset: loff_t, _whence: Whence) -> Result<loff_t> {
+    fn llseek(_file: &File<Self::State>, _offset: loff_t, _whence: Whence) -> Result<loff_t> {
         build_error!(VTABLE_DEFAULT_ERROR)
     }
 
     /// read impl
     fn read(
-        _file: &File<Self>,
+        _file: &File<Self::State>,
         _out: UserSliceWriter,
         _bytes: usize,
         _offset: &mut loff_t,
@@ -46,7 +48,7 @@ pub trait Operations: Sized + ForeignOwnable + Sync + Send {
 
     /// read impl
     fn write(
-        _file: &File<Self>,
+        _file: &File<Self::State>,
         _in_: UserSliceReader,
         _bytes: usize,
         _offset: &mut loff_t,
@@ -56,13 +58,15 @@ pub trait Operations: Sized + ForeignOwnable + Sync + Send {
 
     /// open impl
     // TODO inode access
-    fn open(_file: &RawFile<Self::Init>) -> Result<Self> {
+    fn open(_file: &RawFile<Self::Init>) -> Result<Self::State> {
         build_error!(VTABLE_DEFAULT_ERROR)
     }
 
     /// release impl
+    /// Note - the owned private data will be dropped after this call returns. You should not do it
+    /// manually.
     // TODO inode access
-    fn release(_file: &File<Self>) {
+    fn release(_file: &File<Self::State>) {
         build_error!(VTABLE_DEFAULT_ERROR)
     }
 
@@ -70,7 +74,7 @@ pub trait Operations: Sized + ForeignOwnable + Sync + Send {
     // TODO proper ioctl cmd type
     // TODO validate that removing isize as an option is right here - I think it is, because that
     // negative space will get our error encoding.
-    fn ioctl(_file: &File<Self>, _cmd: u32, _arg: usize) -> Result<usize> {
+    fn ioctl(_file: &File<Self::State>, _cmd: u32, _arg: usize) -> Result<usize> {
         build_error!(VTABLE_DEFAULT_ERROR)
     }
 
@@ -78,18 +82,23 @@ pub trait Operations: Sized + ForeignOwnable + Sync + Send {
     // TODO proper ioctl cmd type
     // TODO validate that removing isize as an option is right here
     #[cfg(CONFIG_COMPAT)]
-    fn compat_ioctl(_file: &File<Self>, _cmd: u32, _arg: usize) -> Result<usize> {
+    fn compat_ioctl(_file: &File<Self::State>, _cmd: u32, _arg: usize) -> Result<usize> {
         build_error!(VTABLE_DEFAULT_ERROR)
     }
 
     /// show fdinfo impl
-    fn show_fdinfo(_seq_file: &SeqFile, _file: &File<Self>) {
+    fn show_fdinfo(_seq_file: &SeqFile, _file: &File<Self::State>) {
         build_error!(VTABLE_DEFAULT_ERROR)
     }
     /// vtable suitable for use in a file_operations slot
     const VTABLE: bindings::file_operations = bindings::file_operations {
         open: Some(fops_open::<Self>),
-        release: Some(fops_release::<Self>),
+        release: if Self::HAS_RELEASE || core::mem::needs_drop::<Self::State>() {
+            // If the drop is nontrivial, or we have a custom release, we need a pointer
+            Some(fops_release::<Self>)
+        } else {
+            None
+        },
         unlocked_ioctl: then_some(Self::HAS_IOCTL, fops_ioctl::<Self>),
         #[cfg(CONFIG_COMPAT)]
         compat_ioctl: if Self::HAS_COMPAT_IOCTL {
@@ -151,7 +160,12 @@ unsafe extern "C" fn fops_release<T: Operations>(
     // SAFETY:
     // * The file is valid for the duration of this call.
     // * There is no active fdget_pos region on the file on this thread.
-    T::release(unsafe { File::from_raw_file(file) });
+    let file = unsafe { File::from_raw_file(file) };
+    if T::HAS_RELEASE {
+        T::release(file)
+    }
+    // SAFETY: TODO
+    drop(unsafe { file.take_private_data() } );
 
     0
 }

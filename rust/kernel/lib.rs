@@ -41,6 +41,8 @@ pub mod block;
 #[doc(hidden)]
 pub mod build_assert;
 pub mod cred;
+#[cfg(CONFIG_DEBUG_FS)]
+pub mod debugfs;
 pub mod device;
 pub mod device_id;
 pub mod devres;
@@ -68,11 +70,13 @@ pub mod pid_namespace;
 pub mod platform;
 pub mod prelude;
 pub mod print;
+pub mod rand;
 pub mod rbtree;
 pub mod revocable;
 pub mod security;
 pub mod seq_file;
 pub mod sizes;
+pub mod soc;
 mod static_assert;
 #[doc(hidden)]
 pub mod std_vendor;

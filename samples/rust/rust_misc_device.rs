@@ -156,10 +156,10 @@ struct RustMiscDevice {
 
 #[vtable]
 impl Operations for RustMiscDevice {
-    type Init = &'static MiscDeviceRegistration<Self>;
+    type Init<'a> = &'a MiscDeviceRegistration<Self>;
     type State = Pin<KBox<RustMiscDevice>>;
 
-    fn open(file: &RawFile<&'static MiscDeviceRegistration<Self>>) -> Result<Self::State> {
+    fn open<'a>(file: &RawFile<&'a MiscDeviceRegistration<Self>>) -> Result<Self::State> {
         let dev = ARef::from(file.private_data().device());
 
         dev_info!(dev, "Opening Rust Misc Device Sample\n");

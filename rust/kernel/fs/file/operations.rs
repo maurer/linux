@@ -27,7 +27,7 @@ pub struct Whence(pub ffi::c_int);
 #[vtable]
 pub trait Operations: Sized + 'static {
     /// Type that comes into open when constructing
-    type Init: ForeignOwnable;
+    type Init<'a>: ForeignOwnable;
     /// Type of private_data after open
     type State: ForeignOwnable + Sync + Send + 'static;
 
@@ -58,7 +58,7 @@ pub trait Operations: Sized + 'static {
 
     /// open impl
     // TODO inode access
-    fn open<'a>(_file: &'a RawFile<Self::Init>) -> Result<Self::State> {
+    fn open<'a>(_file: &RawFile<Self::Init<'a>>) -> Result<Self::State> {
         build_error!(VTABLE_DEFAULT_ERROR)
     }
 

@@ -28,7 +28,7 @@ pub struct MiscDeviceOptions {
 
 impl MiscDeviceOptions {
     /// Create a raw `struct miscdev` ready for registration.
-    pub const fn into_raw<T: Operations<Init = &'static MiscDeviceRegistration<T>> + 'static>(
+    pub const fn into_raw<'a, T: Operations<Init<'a> = &'a MiscDeviceRegistration<T>> + 'static>(
         self,
     ) -> bindings::miscdevice {
         // SAFETY: All zeros is valid for this C type.
@@ -60,7 +60,7 @@ unsafe impl<T> Send for MiscDeviceRegistration<T> {}
 // parallel.
 unsafe impl<T> Sync for MiscDeviceRegistration<T> {}
 
-impl<T: Operations<Init = &'static Self> + 'static> MiscDeviceRegistration<T> {
+impl<'a, T: Operations<Init<'a> = &'a Self> + 'static> MiscDeviceRegistration<T> {
     /// Register a misc device.
     pub fn register(opts: MiscDeviceOptions) -> impl PinInit<Self, Error> {
         try_pin_init!(Self {

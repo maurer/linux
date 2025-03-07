@@ -29,7 +29,7 @@ pub trait Operations: Sized + 'static {
     /// Type that comes into open when constructing
     type Init<'a>: ForeignOwnable;
     /// Type of private_data after open
-    type State: ForeignOwnable + Sync + Send + 'static;
+    type State: ForeignOwnable + Sync + Send;
 
     /// Seek impl
     fn llseek(_file: &File<Self::State>, _offset: loff_t, _whence: Whence) -> Result<loff_t> {

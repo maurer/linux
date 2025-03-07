@@ -818,8 +818,8 @@ impl fmt::Write for Formatter {
 /// assert_eq!(s.is_ok(), false);
 /// # Ok::<(), kernel::error::Error>(())
 /// ```
-pub struct CString {
-    buf: KVec<u8>,
+pub struct CString<B = KVec<u8>> {
+    buf: B,
 }
 
 impl CString {
@@ -857,21 +857,21 @@ impl CString {
     }
 }
 
-impl Deref for CString {
+impl<B: Deref<Target = [u8]>> Deref for CString<B> {
     type Target = CStr;
 
     fn deref(&self) -> &Self::Target {
         // SAFETY: The type invariants guarantee that the string is `NUL`-terminated and that no
         // other `NUL` bytes exist.
-        unsafe { CStr::from_bytes_with_nul_unchecked(self.buf.as_slice()) }
+        unsafe { CStr::from_bytes_with_nul_unchecked(&self.buf) }
     }
 }
 
-impl DerefMut for CString {
+impl<B: DerefMut + Deref<Target = [u8]>> DerefMut for CString<B> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         // SAFETY: A `CString` is always NUL-terminated and contains no other
         // NUL bytes.
-        unsafe { CStr::from_bytes_with_nul_unchecked_mut(self.buf.as_mut_slice()) }
+        unsafe { CStr::from_bytes_with_nul_unchecked_mut(&mut self.buf) }
     }
 }
 

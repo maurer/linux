@@ -21,5 +21,3 @@ impl platform::Driver for QcomSocInfo {
         Ok(KBox::pin(Self, GFP_KERNEL)?)
     }
 }
-
-

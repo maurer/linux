@@ -8,7 +8,6 @@
 //!
 //! Reference: <https://www.kernel.org/doc/html/latest/driver-api/misc_devices.html>
 
-use crate::types::Outlives;
 use crate::{
     bindings,
     device::Device,
@@ -29,7 +28,7 @@ pub struct MiscDeviceOptions {
 
 impl MiscDeviceOptions {
     /// Create a raw `struct miscdev` ready for registration.
-    pub const fn into_raw<T: Operations<Init = Outlives<MiscDeviceRegistration<T>>> + 'static>(
+    pub const fn into_raw<T: Operations<Init = &'static MiscDeviceRegistration<T>> + 'static>(
         self,
     ) -> bindings::miscdevice {
         // SAFETY: All zeros is valid for this C type.
@@ -61,7 +60,7 @@ unsafe impl<T> Send for MiscDeviceRegistration<T> {}
 // parallel.
 unsafe impl<T> Sync for MiscDeviceRegistration<T> {}
 
-impl<T: Operations<Init = Outlives<Self>> + 'static> MiscDeviceRegistration<T> {
+impl<T: Operations<Init = &'static Self> + 'static> MiscDeviceRegistration<T> {
     /// Register a misc device.
     pub fn register(opts: MiscDeviceOptions) -> impl PinInit<Self, Error> {
         try_pin_init!(Self {

@@ -107,7 +107,7 @@ use kernel::{
     new_mutex,
     prelude::*,
     sync::Mutex,
-    types::{ARef, Outlives},
+    types::ARef,
     uaccess::{UserSlice, UserSliceReader, UserSliceWriter},
 };
 
@@ -156,10 +156,10 @@ struct RustMiscDevice {
 
 #[vtable]
 impl Operations for RustMiscDevice {
-    type Init = Outlives<MiscDeviceRegistration<Self>>;
+    type Init = &'static MiscDeviceRegistration<Self>;
     type State = Pin<KBox<RustMiscDevice>>;
 
-    fn open(file: &RawFile<Outlives<MiscDeviceRegistration<Self>>>) -> Result<Self::State> {
+    fn open(file: &RawFile<&'static MiscDeviceRegistration<Self>>) -> Result<Self::State> {
         let dev = ARef::from(file.private_data().device());
 
         dev_info!(dev, "Opening Rust Misc Device Sample\n");

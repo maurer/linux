@@ -29,7 +29,7 @@ pub trait Operations: Sized + 'static {
     /// Type that comes into open when constructing
     type Init: ForeignOwnable;
     /// Type of private_data after open
-    type State: ForeignOwnable + Sync + Send;
+    type State: ForeignOwnable + Sync + Send + 'static;
 
     /// Seek impl
     fn llseek(_file: &File<Self::State>, _offset: loff_t, _whence: Whence) -> Result<loff_t> {
@@ -58,7 +58,7 @@ pub trait Operations: Sized + 'static {
 
     /// open impl
     // TODO inode access
-    fn open(_file: &RawFile<Self::Init>) -> Result<Self::State> {
+    fn open<'a>(_file: &'a RawFile<Self::Init>) -> Result<Self::State> {
         build_error!(VTABLE_DEFAULT_ERROR)
     }
 
@@ -142,10 +142,11 @@ unsafe extern "C" fn fops_open<T: Operations>(
     // * The file is guaranteed to use `<T as Operations>::Init` by precondition.
     let file = unsafe { InitFile::from_raw_file(raw_file) };
 
-    match T::open(&file) {
-        Ok(ptr) => file.set_private(ptr),
+    let ptr = match T::open(&file) {
         Err(err) => return err.to_errno(),
+        Ok(ptr) => ptr,
     };
+    file.set_private(ptr);
     0
 }
 

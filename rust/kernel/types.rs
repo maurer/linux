@@ -126,27 +126,20 @@ impl ForeignOwnable for () {
     unsafe fn borrow_mut<'a>(_: *mut crate::ffi::c_void) -> Self::BorrowedMut<'a> {}
 }
 
-/// Intended to model cases where private is managed to outlive all files/inodes etc. referencing
-/// them by an external mechanism. For example, a miscdevice registration, a modinfo pointer, etc.
-#[repr(transparent)]
-pub struct Outlives<T: 'static>(&'static T);
-
-// TODO should this be another trait that ForeignOwnable implements? I started down that route,
-// then found that it was almost identical...
-impl <T: 'static> ForeignOwnable for Outlives<T> {
-    type Borrowed<'a> = &'a T;
-    type BorrowedMut<'a> = &'a T;
+impl <'b, T> ForeignOwnable for &'b T {
+    type Borrowed<'a> = &'b T;
+    type BorrowedMut<'a> = &'b T;
 
     fn into_foreign(self) -> *mut crate::ffi::c_void {
-        self.0 as *const _ as *mut _
+        self as *const _ as *mut _
     }
 
     unsafe fn from_foreign(ptr: *mut crate::ffi::c_void) -> Self {
-        unsafe { Self(ptr.cast::<T>().as_ref().unwrap_unchecked()) }
+        unsafe { ptr.cast::<T>().as_ref().unwrap_unchecked() }
     }
 
     unsafe fn borrow<'a>(ptr: *mut crate::ffi::c_void) -> Self::Borrowed<'a> {
-        unsafe { Self::from_foreign(ptr).0 }
+        unsafe { Self::from_foreign(ptr) }
     }
     unsafe fn borrow_mut<'a>(ptr: *mut crate::ffi::c_void) -> Self::BorrowedMut<'a> {
         unsafe { Self::borrow(ptr) }

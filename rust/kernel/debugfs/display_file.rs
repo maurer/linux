@@ -5,7 +5,9 @@ use crate::prelude::*;
 use crate::seq_file::SeqFile;
 use crate::seq_print;
 use crate::types::ForeignOwnable;
-use core::fmt::Display;
+use core::fmt::{Display, Formatter, Result};
+use core::marker::PhantomData;
+use core::ops::Deref;
 
 /// Implements `open` for `file_operations` via `single_open` to fill out a `seq_file`.
 ///
@@ -69,4 +71,85 @@ where
         // SAFETY: `file_operations` supports zeroes in all fields.
         ..unsafe { core::mem::zeroed() }
     };
+}
+
+/// Adapter to implement `Display` via a callback with the same representation as `T`.
+///
+/// # Invariants
+///
+/// If an instance for `FormatAdapter<_, F>` is constructed, `F` is inhabited.
+#[repr(transparent)]
+pub(crate) struct FormatAdapter<D, F> {
+    inner: D,
+    _formatter: PhantomData<F>,
+}
+
+impl<D, F> FormatAdapter<D, F> {
+    pub(crate) fn new(inner: D, _f: &'static F) -> Self {
+        // INVARIANT: We were passed a reference to F, so it is inhabited.
+        FormatAdapter {
+            inner,
+            _formatter: PhantomData,
+        }
+    }
+}
+
+pub(crate) struct BorrowedAdapter<'a, D: ForeignOwnable, F> {
+    borrowed: D::Borrowed<'a>,
+    _formatter: PhantomData<F>,
+}
+
+// SAFETY: We delegate to D's implementation of `ForeignOwnable`, so `into_foreign` produced aligned
+// pointers.
+unsafe impl<D: ForeignOwnable, F> ForeignOwnable for FormatAdapter<D, F> {
+    type PointedTo = D::PointedTo;
+    type Borrowed<'a> = BorrowedAdapter<'a, D, F>;
+    type BorrowedMut<'a> = Self::Borrowed<'a>;
+    fn into_foreign(self) -> *mut Self::PointedTo {
+        self.inner.into_foreign()
+    }
+    unsafe fn from_foreign(foreign: *mut Self::PointedTo) -> Self {
+        Self {
+            // SAFETY: `into_foreign` is delegated, so a delegated `from_foreign` is safe.
+            inner: unsafe { D::from_foreign(foreign) },
+            _formatter: PhantomData,
+        }
+    }
+    unsafe fn borrow<'a>(foreign: *mut Self::PointedTo) -> Self::Borrowed<'a> {
+        BorrowedAdapter {
+            // SAFETY: `into_foreign` is delegated, so a delegated `borrow` is safe.
+            borrowed: unsafe { D::borrow(foreign) },
+            _formatter: PhantomData,
+        }
+    }
+    unsafe fn borrow_mut<'a>(foreign: *mut Self::PointedTo) -> Self::BorrowedMut<'a> {
+        // SAFETY: `borrow_mut` has stricter requirements than `borrow`
+        unsafe { Self::borrow(foreign) }
+    }
+}
+
+impl<'a, D: ForeignOwnable<Borrowed<'a>: Deref<Target = T>>, T, F> Display
+    for BorrowedAdapter<'a, D, F>
+where
+    F: Fn(&T, &mut Formatter<'_>) -> Result + 'static,
+{
+    fn fmt(&self, fmt: &mut Formatter<'_>) -> Result {
+        // SAFETY: FormatAdapter<_, F> can only be constructed if F is inhabited
+        let f: &F = unsafe { materialize_zst_fmt() };
+        f(&self.borrowed, fmt)
+    }
+}
+
+/// For types with a unique value, produce a static reference to it.
+///
+/// # Safety
+///
+/// The caller asserts that F is inhabited
+unsafe fn materialize_zst_fmt<F>() -> &'static F {
+    const { assert!(core::mem::size_of::<F>() == 0) };
+    let zst_dangle: core::ptr::NonNull<F> = core::ptr::NonNull::dangling();
+    // SAFETY: While the pointer is dangling, it is a dangling pointer to a ZST, based on the
+    // assertion above. The type is also inhabited, by the caller's assertion. This means
+    // we can materialize it.
+    unsafe { zst_dangle.as_ref() }
 }

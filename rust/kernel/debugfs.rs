@@ -10,7 +10,9 @@ use crate::str::CStr;
 #[cfg(CONFIG_DEBUG_FS)]
 use crate::sync::Arc;
 use crate::types::ForeignOwnable;
+use core::fmt;
 use core::fmt::Display;
+use core::ops::Deref;
 
 #[cfg(CONFIG_DEBUG_FS)]
 mod display_file;
@@ -155,6 +157,49 @@ impl Dir {
         for<'a> D::Borrowed<'a>: Display,
     {
         self.create_file(name, data)
+    }
+
+    /// Create a file in a DebugFS directory with the provided name, and contents from invoking `f`
+    /// on the provided reference.
+    ///
+    /// `f` must be a function item or a non-capturing closure, or this will fail to compile.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use core::sync::atomic::{AtomicU32, Ordering};
+    /// # use kernel::c_str;
+    /// # use kernel::debugfs::Dir;
+    /// let dir = Dir::new(c_str!("foo"));
+    /// static MY_ATOMIC: AtomicU32 = AtomicU32::new(3);
+    /// let file = dir.fmt_file(c_str!("bar"), &MY_ATOMIC, &|val, f| {
+    ///   let out = val.load(Ordering::Relaxed);
+    ///   writeln!(f, "{out:#010x}")
+    /// });
+    /// MY_ATOMIC.store(10, Ordering::Relaxed);
+    /// ```
+    pub fn fmt_file<
+        D: ForeignOwnable + Send + Sync,
+        T,
+        F: Fn(&T, &mut fmt::Formatter<'_>) -> fmt::Result + Send + Sync,
+    >(
+        &self,
+        name: &CStr,
+        data: D,
+        f: &'static F,
+    ) -> File
+    where
+        for<'a> D::Borrowed<'a>: Deref<Target = T>,
+    {
+        #[cfg(CONFIG_DEBUG_FS)]
+        let data_adapted = display_file::FormatAdapter::new(data, f);
+        #[cfg(not(CONFIG_DEBUG_FS))]
+        let data_adapted = {
+            // Mark used
+            let (_, _) = (data, f);
+            &0
+        };
+        self.display_file(name, data_adapted)
     }
 
     /// Create a new directory in DebugFS at the root.

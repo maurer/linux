@@ -142,6 +142,64 @@ unsafe impl ForeignOwnable for () {
     unsafe fn borrow_mut<'a>(_: *mut Self::PointedTo) -> Self::BorrowedMut<'a> {}
 }
 
+// SAFETY: The `into_foreign` function derives its pointer from a reference, so it is correctly
+// aligned.
+unsafe impl<T: 'static> ForeignOwnable for &'static T {
+    type PointedTo = T;
+    type Borrowed<'a> = &'a T;
+    type BorrowedMut<'a> = &'a T;
+
+    fn into_foreign(self) -> *mut Self::PointedTo {
+        core::ptr::from_ref(self).cast_mut()
+    }
+
+    unsafe fn from_foreign(foreign: *mut Self::PointedTo) -> Self {
+        // SAFETY: from_foreign has stricter restrictions than borrow
+        unsafe { Self::borrow(foreign) }
+    }
+
+    unsafe fn borrow<'a>(foreign: *mut Self::PointedTo) -> Self::Borrowed<'a> {
+        // SAFETY: We know the original reference lived forever, so we can convert it back
+        unsafe { &*foreign }
+    }
+
+    unsafe fn borrow_mut<'a>(foreign: *mut Self::PointedTo) -> Self::BorrowedMut<'a> {
+        // SAFETY: borrow_mut has stricter restrictions than borrow
+        unsafe { Self::borrow(foreign) }
+    }
+}
+
+// SAFETY: The `into_foreign` function derives its pointer from a reference, so it is correctly
+// aligned.
+unsafe impl<T: 'static> ForeignOwnable for &'static mut T {
+    type PointedTo = T;
+    type Borrowed<'a> = &'a T;
+    type BorrowedMut<'a> = &'a mut T;
+
+    fn into_foreign(self) -> *mut Self::PointedTo {
+        core::ptr::from_mut(self)
+    }
+
+    unsafe fn from_foreign(foreign: *mut Self::PointedTo) -> Self {
+        // SAFETY: from_foreign has stricter restrictions than `borrow_mut`
+        unsafe { Self::borrow_mut(foreign) }
+    }
+
+    unsafe fn borrow<'a>(foreign: *mut Self::PointedTo) -> Self::Borrowed<'a> {
+        // SAFETY: We know the original reference lived forever, and the requirements on the
+        // function indicate that `from_foreign` and `borrow_mut` will not happen concurrently, so
+        // we can do a shared borrow.
+        unsafe { &*foreign }
+    }
+
+    unsafe fn borrow_mut<'a>(foreign: *mut Self::PointedTo) -> Self::BorrowedMut<'a> {
+        // SAFETY: We know the original reference lived forever, and the requirements on the
+        // function indicate that no other borrows will happen concurrently, so we can do a
+        // unique borrow.
+        unsafe { &mut *foreign }
+    }
+}
+
 /// Runs a cleanup function/closure when dropped.
 ///
 /// The [`ScopeGuard::dismiss`] function prevents the cleanup function from running.
